@@ -1,56 +1,51 @@
-import crypto from "crypto";
+﻿import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import { v4 as uuidv4 } from "uuid";
 import { v2 as cloudinary } from "cloudinary";
 import nodemailer from "nodemailer";
 
-// Generate a random OTP
 export const generateOTP = () => {
   const OTP_LENGTH = 6;
-  const otp = Array.from({ length: OTP_LENGTH }, () =>
-    crypto.randomInt(0, 9)
-  ).join("");
-  return otp;
+  return Array.from({ length: OTP_LENGTH }, () => crypto.randomInt(0, 10)).join("");
 };
 
-//Generate unique ID
 export const generateUniqueId = () => {
-  const timestamp = Date.now().toString(36); // Convert current timestamp to base36 string
-  const randomPart = Math.random().toString(36).substr(2, 6); // Get 6 random characters
-
-  const uniquePart = timestamp + randomPart;
-  const uniqueId = uniquePart.substring(0, 8);
-
-  return `BK${uniqueId}`;
+  const timestamp = Date.now().toString(36);
+  const randomPart = Math.random().toString(36).slice(2, 8);
+  return `BK${(timestamp + randomPart).slice(0, 8).toUpperCase()}`;
 };
 
-//password hashing
 export const hashPassword = async (newPassword) => {
-  const salt = await bcrypt.genSalt(Number.parseInt(10));
-  const hashedPassword = await bcrypt.hash(newPassword, salt);
-  return Promise.resolve(hashedPassword);
+  const salt = await bcrypt.genSalt(10);
+  return bcrypt.hash(newPassword, salt);
 };
 
 export const uniqueTransactionId = () => {
-  return uuidv4().replace(/-/g, "").substr(0, 12).toUpperCase();
+  return uuidv4().replace(/-/g, "").slice(0, 12).toUpperCase();
 };
 
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: process.env.EMAIL_HOST || "smtp.gmail.com",
+  port: Number(process.env.EMAIL_PORT || 587),
+  secure: false,
   auth: {
     user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
+    pass: process.env.EMAIL_PASSWORD || process.env.EMAIL_PASS,
   },
 });
 
 export const sendOTP = async (email, code) => {
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
+  if (!process.env.EMAIL_USER || !(process.env.EMAIL_PASSWORD || process.env.EMAIL_PASS)) {
+    console.log("Email OTP skipped: missing SMTP credentials", { email, code });
+    return;
+  }
+
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
     to: email,
     subject: "Verification Code",
     text: `Your verification code is: ${code}`,
-  };
-  await transporter.sendMail(mailOptions);
+  });
 };
 
 cloudinary.config({
@@ -61,16 +56,10 @@ cloudinary.config({
 
 export const uploadOnCloudinary = (fileBuffer, options = {}) => {
   return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { ...options },
-      (error, result) => {
-        if (error) {
-          console.error("Cloudinary upload error:", error);
-          return reject(error);
-        }
-        resolve(result);
-      }
-    );
+    const stream = cloudinary.uploader.upload_stream({ ...options }, (error, result) => {
+      if (error) return reject(error);
+      resolve(result);
+    });
     stream.end(fileBuffer);
   });
 };

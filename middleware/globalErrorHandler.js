@@ -1,16 +1,15 @@
-import handleValidationError from "../errors/handleValidationError.js";
+﻿import handleValidationError from "../errors/handleValidationError.js";
 import HandleCastError from "../errors/HandleCastError.js";
 import handleDuplicateError from "../errors/handleDuplicateError.js";
-import AppError from "./../errors/AppError.js";
+import AppError from "../errors/AppError.js";
 
 const globalErrorHandler = (err, req, res, next) => {
-  console.log({ GlobalError: err });
   let statusCode = 500;
-  let message = err.message;
+  let message = err.message || "Something went wrong";
   let errorSources = [
     {
       path: "",
-      message: err.message,
+      message,
     },
   ];
 
@@ -35,7 +34,7 @@ const globalErrorHandler = (err, req, res, next) => {
     errorSources = [
       {
         path: "",
-        message: err?.message,
+        message,
       },
     ];
   }
@@ -44,8 +43,7 @@ const globalErrorHandler = (err, req, res, next) => {
     success: false,
     message,
     errorSources,
-    err,
-    stack: err?.stack | null,
+    stack: process.env.NODE_ENV === "development" ? err?.stack : undefined,
   });
 };
 

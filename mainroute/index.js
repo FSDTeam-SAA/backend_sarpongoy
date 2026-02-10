@@ -1,10 +1,11 @@
-import express from "express";
-
-// Import all route files
+﻿import express from "express";
+import adminRoute from "../route/admin.route.js";
+import authRoute from "../route/auth.route.js";
+import studentRoute from "../route/student.route.js";
+import teacherRoute from "../route/teacher.route.js";
 
 const router = express.Router();
 
-// Health check route
 router.get("/health", (req, res) => {
   res.status(200).json({
     success: true,
@@ -13,10 +14,12 @@ router.get("/health", (req, res) => {
   });
 });
 
-// Mount all routes
+router.use("/auth", authRoute);
+router.use("/admin", adminRoute);
+router.use("/teacher", teacherRoute);
+router.use("/student", studentRoute);
 
-// 404 handler for undefined routes
-router.all("/", (req, res) => {
+router.use((req, res) => {
   res.status(404).json({
     success: false,
     message: `Cannot ${req.method} ${req.originalUrl}`,

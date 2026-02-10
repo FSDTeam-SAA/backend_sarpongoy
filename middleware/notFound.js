@@ -1,10 +1,8 @@
-// const httpStatus = require("http-status");
-
-const notFound = (req, res, next) => {
-  return res.status(400).json({
+﻿const notFound = (req, res, next) => {
+  return res.status(404).json({
     success: false,
-    message: "API Not Found !!",
-    error: "",
+    message: `Cannot ${req.method} ${req.originalUrl}`,
+    error: "API Not Found",
   });
 };
 

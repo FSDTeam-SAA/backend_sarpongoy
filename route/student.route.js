@@ -1,0 +1,35 @@
+﻿import express from "express";
+import {
+  createStudentSupportTicket,
+  getStudentCourseContent,
+  getStudentHome,
+  getStudentOnboarding,
+  getStudentPrivacyPolicy,
+  getStudentProfile,
+  getStudentProgress,
+  getStudentSubjectProgress,
+  saveStudentActivity,
+  updateStudentProfile,
+} from "../controllers/student.controller.js";
+import { protect, restrictTo } from "../middleware/auth.middleware.js";
+
+const router = express.Router();
+
+router.get("/onboarding", getStudentOnboarding);
+
+router.use(protect, restrictTo("student"));
+
+router.get("/home", getStudentHome);
+router.get("/courses/:courseId", getStudentCourseContent);
+router.post("/activities", saveStudentActivity);
+
+router.get("/progress", getStudentProgress);
+router.get("/progress/subject/:courseId", getStudentSubjectProgress);
+
+router.get("/profile", getStudentProfile);
+router.patch("/profile", updateStudentProfile);
+
+router.get("/privacy-policy", getStudentPrivacyPolicy);
+router.post("/support", createStudentSupportTicket);
+
+export default router;

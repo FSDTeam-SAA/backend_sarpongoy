@@ -1,54 +1,87 @@
-import mongoose, { Schema } from "mongoose";
+﻿import mongoose, { Schema } from "mongoose";
 import bcrypt from "bcryptjs";
 
 const userSchema = new Schema(
   {
-    name: { type: String },
-    email: { type: String },
-    password: { type: String, select: false },
-    userId: { type: String },
+    name: { type: String, trim: true },
+    firstName: { type: String, trim: true },
+    lastName: { type: String, trim: true },
+    email: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      unique: true,
+      sparse: true,
+    },
+    password: { type: String, required: true, select: false },
+    userId: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
     role: {
       type: String,
       enum: ["student", "teacher", "admin"],
       default: "admin",
+      index: true,
+    },
+    status: {
+      type: String,
+      enum: ["active", "inactive"],
+      default: "active",
+    },
+    school: {
+      type: Schema.Types.ObjectId,
+      ref: "School",
+    },
+    gradeLevel: {
+      type: String,
+      enum: ["JHS 1", "JHS 2", "JHS 3", "SS 1", "SS 2", "SS 3", "SS 4", "SS 5"],
     },
     verificationInfo: {
       verified: { type: Boolean, default: false },
       token: { type: String, default: "" },
     },
     password_reset_token: { type: String, default: "" },
-    refreshToken: { type: String, default: "" },
+    passwordResetOTP: {
+      code: { type: String, default: "" },
+      expiry: { type: Date },
+      verified: { type: Boolean, default: false },
+    },
+    refreshToken: { type: String, default: "", select: false },
     isEmailVerified: { type: Boolean, default: false },
-    resetPasswordOTP: { type: String },
-    resetPasswordOTPExpiry: { type: Date },
-    deleteReason: { type: String },
+    deleteReason: { type: String, default: "" },
   },
   { timestamps: true },
 );
 
-userSchema.pre("save", async function (next) {
-  if (this.isModified("password")) {
-    const saltRounds = Number(process.env.bcrypt_salt_round) || 10;
-    this.password = await bcrypt.hash(this.password, saltRounds);
+userSchema.pre("save", async function userPreSave(next) {
+  if (!this.isModified("password")) {
+    return next();
   }
+
+  const saltRounds = Number(process.env.bcrypt_salt_round) || 10;
+  this.password = await bcrypt.hash(this.password, saltRounds);
   next();
 });
 
-// Statics (unchanged)
-userSchema.statics.isUserExistsByEmail = async function (email) {
-  return await this.findOne({ email }).select("+password");
+userSchema.statics.isUserExistsByEmail = async function isUserExistsByEmail(email) {
+  return this.findOne({ email }).select("+password");
 };
 
-userSchema.statics.isOTPVerified = async function (id) {
+userSchema.statics.isOTPVerified = async function isOTPVerified(id) {
   const user = await this.findById(id).select("+verificationInfo");
   return user?.isEmailVerified;
 };
 
-userSchema.statics.isPasswordMatched = async function (
+userSchema.statics.isPasswordMatched = async function isPasswordMatched(
   plainTextPassword,
   hashPassword,
 ) {
-  return await bcrypt.compare(plainTextPassword, hashPassword);
+  return bcrypt.compare(plainTextPassword, hashPassword);
 };
 
 export const User = mongoose.model("User", userSchema);
