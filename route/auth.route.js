@@ -8,10 +8,11 @@ import {
   registerAdmin,
   resetPassword,
   resetStudentPasswordBySecurity,
+  saveStudentSecurityQuestions,
   verifyForgotPasswordOTP,
   verifyStudentSecurityAnswers,
 } from "../controllers/auth.controller.js";
-import { protect } from "../middleware/auth.middleware.js";
+import { protect, restrictTo } from "../middleware/auth.middleware.js";
 
 const router = express.Router();
 
@@ -22,6 +23,7 @@ router.post("/logout", logout);
 router.post("/forgot-password", forgotPassword);
 router.post("/verify-otp", verifyForgotPasswordOTP);
 router.post("/reset-password", resetPassword);
+router.post("/student/security-questions", protect, restrictTo("student"), saveStudentSecurityQuestions);
 router.post("/student/verify-security", verifyStudentSecurityAnswers);
 router.post("/student/reset-password", resetStudentPasswordBySecurity);
 router.get("/me", protect, me);

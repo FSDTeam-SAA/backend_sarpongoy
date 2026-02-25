@@ -6,7 +6,10 @@ export const createToken = (
   secret,
   expiresIn,
 ) => {
-  const options = { expiresIn: expiresIn };
+  const options = {};
+  if (expiresIn) {
+    options.expiresIn = expiresIn;
+  }
   return jwt.sign(jwtPayload, secret, options);
 };
 

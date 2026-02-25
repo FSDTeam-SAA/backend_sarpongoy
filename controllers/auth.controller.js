@@ -4,11 +4,135 @@ import { User } from "../models/user.model.js";
 import { Student } from "../models/student.model.js";
 import { createToken, verifyToken } from "../utils/authToken.js";
 import { generateOTP, sendOTP } from "../utils/commonMethod.js";
+import { DEFAULT_SECURITY_QUESTIONS } from "../utils/securityQuestions.js";
 import catchAsync from "../utils/catchAsync.js";
 import sendResponse from "../utils/sendResponse.js";
 
 const ACCESS_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || process.env.JWT_ACCESS_EXPIRY || "15m";
 const REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || process.env.JWT_REFRESH_EXPIRY || "7d";
+
+const normalizeQuestionKey = (value) => String(value || "").trim().toLowerCase();
+
+const DEFAULT_SECURITY_QUESTION_KEY_MAP = new Map(
+  DEFAULT_SECURITY_QUESTIONS.map((question) => [normalizeQuestionKey(question), question]),
+);
+
+const buildAnswerMap = (answers) => {
+  const map = new Map();
+
+  for (const item of answers || []) {
+    const questionKey = normalizeQuestionKey(item?.question);
+    const normalizedAnswer = String(item?.answer || "").trim().toLowerCase();
+
+    if (!questionKey || !normalizedAnswer) continue;
+    map.set(questionKey, normalizedAnswer);
+  }
+
+  return map;
+};
+
+const getUniqueSecurityQuestions = (questions = []) => {
+  const byKey = new Map();
+
+  for (const item of questions) {
+    const questionKey = normalizeQuestionKey(item?.question);
+    if (!questionKey || !item?.answerHash || byKey.has(questionKey)) continue;
+
+    byKey.set(questionKey, {
+      question: String(item.question).trim(),
+      answerHash: item.answerHash,
+    });
+  }
+
+  return [...byKey.values()];
+};
+
+const parseSecurityQuestionsForSave = async (body = {}) => {
+  let entries = [];
+
+  if (Array.isArray(body.securityQuestions)) {
+    entries = body.securityQuestions;
+  } else if (Array.isArray(body.answers)) {
+    entries = body.answers;
+  } else if (body.securityAnswers && typeof body.securityAnswers === "object") {
+    entries = Object.entries(body.securityAnswers).map(([question, answer]) => ({ question, answer }));
+  }
+
+  const answerByQuestionKey = new Map();
+  for (const item of entries) {
+    const questionKey = normalizeQuestionKey(item?.question);
+    const normalizedAnswer = String(item?.answer || "").trim().toLowerCase();
+
+    if (!questionKey || !normalizedAnswer || !DEFAULT_SECURITY_QUESTION_KEY_MAP.has(questionKey)) continue;
+    if (answerByQuestionKey.has(questionKey)) continue;
+
+    answerByQuestionKey.set(questionKey, normalizedAnswer);
+  }
+
+  if (answerByQuestionKey.size !== DEFAULT_SECURITY_QUESTIONS.length) {
+    return { error: `All ${DEFAULT_SECURITY_QUESTIONS.length} security question answers are required` };
+  }
+
+  const securityQuestions = [];
+  for (const defaultQuestion of DEFAULT_SECURITY_QUESTIONS) {
+    const questionKey = normalizeQuestionKey(defaultQuestion);
+    const answer = answerByQuestionKey.get(questionKey);
+
+    if (!answer) {
+      return { error: "Security question set is incomplete" };
+    }
+
+    securityQuestions.push({
+      question: defaultQuestion,
+      answerHash: await bcrypt.hash(answer, 10),
+    });
+  }
+
+  return { securityQuestions };
+};
+
+const countMatchedSecurityAnswers = async ({ answers, securityQuestions, requiredQuestionKeys }) => {
+  const typedAnswers = buildAnswerMap(answers);
+  const storedSecurityQuestionMap = new Map(
+    getUniqueSecurityQuestions(securityQuestions).map((item) => [
+      normalizeQuestionKey(item.question),
+      item.answerHash,
+    ]),
+  );
+
+  let matched = 0;
+  for (const questionKey of requiredQuestionKeys) {
+    const typedAnswer = typedAnswers.get(questionKey);
+    const answerHash = storedSecurityQuestionMap.get(questionKey);
+
+    if (!typedAnswer || !answerHash) continue;
+
+    const isValid = await bcrypt.compare(typedAnswer, answerHash);
+    if (isValid) matched += 1;
+  }
+
+  return matched;
+};
+
+const getStudentFromSecurityResetToken = async (resetToken) => {
+  let decoded;
+  try {
+    decoded = verifyToken(resetToken, process.env.JWT_ACCESS_SECRET);
+  } catch (error) {
+    throw new AppError(401, "Invalid reset token");
+  }
+
+  if (decoded.flow !== "student-security-reset") {
+    throw new AppError(401, "Invalid reset token flow");
+  }
+
+  const user = await User.findById(decoded._id).select("+password");
+  if (!user || user.role !== "student") {
+    throw new AppError(404, "Student not found");
+  }
+
+  return user;
+};
 
 const sanitizeUser = (user) => ({
   _id: user._id,
@@ -234,23 +358,33 @@ export const verifyForgotPasswordOTP = catchAsync(async (req, res, next) => {
 });
 
 export const resetPassword = catchAsync(async (req, res, next) => {
-  const { email, newPassword, confirmPassword } = req.body;
+  const { email, resetToken, newPassword, confirmPassword } = req.body;
 
-  if (!email || !newPassword || !confirmPassword) {
-    return next(new AppError(400, "Email, newPassword and confirmPassword are required"));
+  if (!newPassword || !confirmPassword) {
+    return next(new AppError(400, "newPassword and confirmPassword are required"));
   }
 
   if (newPassword !== confirmPassword) {
     return next(new AppError(400, "Passwords do not match"));
   }
 
-  const user = await User.findOne({ email: String(email).trim().toLowerCase() }).select("+password");
-  if (!user) {
-    return next(new AppError(404, "No user found"));
-  }
+  let user;
 
-  if (!user.passwordResetOTP?.verified) {
-    return next(new AppError(403, "OTP verification required"));
+  if (resetToken) {
+    user = await getStudentFromSecurityResetToken(resetToken);
+  } else {
+    if (!email) {
+      return next(new AppError(400, "Email is required when resetToken is not provided"));
+    }
+
+    user = await User.findOne({ email: String(email).trim().toLowerCase() }).select("+password");
+    if (!user) {
+      return next(new AppError(404, "No user found"));
+    }
+
+    if (!user.passwordResetOTP?.verified) {
+      return next(new AppError(403, "OTP verification required"));
+    }
   }
 
   user.password = newPassword;
@@ -264,11 +398,48 @@ export const resetPassword = catchAsync(async (req, res, next) => {
   });
 });
 
+export const saveStudentSecurityQuestions = catchAsync(async (req, res, next) => {
+  const student = await Student.findOne({ user: req.user._id });
+  if (!student) {
+    return next(new AppError(404, "Student profile not found"));
+  }
+
+  const { securityQuestions, error } = await parseSecurityQuestionsForSave(req.body);
+  if (error) {
+    return next(new AppError(400, error));
+  }
+
+  student.securityQuestions = securityQuestions;
+  await student.save();
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Security questions saved successfully",
+  });
+});
+
 export const verifyStudentSecurityAnswers = catchAsync(async (req, res, next) => {
   const { userId, answers } = req.body;
 
-  if (!userId || !Array.isArray(answers) || answers.length === 0) {
-    return next(new AppError(400, "userId and answers are required"));
+  if (!Array.isArray(answers) || answers.length === 0) {
+    return next(new AppError(400, "answers are required"));
+  }
+
+  if (!userId) {
+    return next(new AppError(400, "userId is required"));
+  }
+
+  const submittedQuestionKeys = [
+    ...new Set(
+      answers
+        .map((item) => normalizeQuestionKey(item?.question))
+        .filter(Boolean),
+    ),
+  ];
+
+  if (submittedQuestionKeys.length !== 2) {
+    return next(new AppError(400, "Exactly 2 security question answers are required"));
   }
 
   const normalizedUserId = String(userId).trim().toUpperCase();
@@ -282,30 +453,26 @@ export const verifyStudentSecurityAnswers = catchAsync(async (req, res, next) =>
     return next(new AppError(400, "Security questions are not set for this student"));
   }
 
-  const normalizedAnswerMap = new Map();
-  for (const item of answers) {
-    if (item?.question && item?.answer) {
-      normalizedAnswerMap.set(String(item.question).trim().toLowerCase(), String(item.answer).trim().toLowerCase());
-    }
+  const savedQuestionKeys = new Set(
+    getUniqueSecurityQuestions(student.securityQuestions).map((item) => normalizeQuestionKey(item.question)),
+  );
+
+  const allSubmittedQuestionsAreValid = submittedQuestionKeys.every((key) => savedQuestionKeys.has(key));
+  if (!allSubmittedQuestionsAreValid) {
+    return next(new AppError(400, "Submitted questions must be from saved security questions"));
   }
 
-  let matched = 0;
-  for (const question of student.securityQuestions) {
-    const typedAnswer = normalizedAnswerMap.get(String(question.question).trim().toLowerCase());
-    if (!typedAnswer) continue;
-    const ok = await bcrypt.compare(typedAnswer, question.answerHash);
-    if (ok) matched += 1;
-  }
+  const matched = await countMatchedSecurityAnswers({
+    answers,
+    securityQuestions: student.securityQuestions,
+    requiredQuestionKeys: submittedQuestionKeys,
+  });
 
-  if (matched < 3) {
+  if (matched !== submittedQuestionKeys.length) {
     return next(new AppError(401, "Security verification failed"));
   }
 
-  const resetToken = createToken(
-    { _id: user._id, role: user.role, flow: "student-security-reset" },
-    process.env.JWT_ACCESS_SECRET,
-    "15m",
-  );
+  const resetToken = createToken({ _id: user._id, role: user.role, flow: "student-security-reset" }, process.env.JWT_ACCESS_SECRET);
 
   sendResponse(res, {
     statusCode: 200,
@@ -330,23 +497,10 @@ export const resetStudentPasswordBySecurity = catchAsync(async (req, res, next) 
     return next(new AppError(400, "Passwords do not match"));
   }
 
-  let decoded;
-  try {
-    decoded = verifyToken(resetToken, process.env.JWT_ACCESS_SECRET);
-  } catch (error) {
-    return next(new AppError(401, "Invalid or expired reset token"));
-  }
-
-  if (decoded.flow !== "student-security-reset") {
-    return next(new AppError(401, "Invalid reset token flow"));
-  }
-
-  const user = await User.findById(decoded._id).select("+password");
-  if (!user || user.role !== "student") {
-    return next(new AppError(404, "Student not found"));
-  }
+  const user = await getStudentFromSecurityResetToken(resetToken);
 
   user.password = newPassword;
+  user.passwordResetOTP = { code: "", expiry: null, verified: false };
   await user.save();
 
   sendResponse(res, {
