@@ -8,6 +8,7 @@ import { User } from "../models/user.model.js";
 import { normalizeGradeLevel } from "../utils/grade.js";
 import catchAsync from "../utils/catchAsync.js";
 import sendResponse from "../utils/sendResponse.js";
+import { uploadOnCloudinary } from "../utils/commonMethod.js";
 
 const ensureStudent = async (userId) => {
   const student = await Student.findOne({ user: userId })
@@ -26,7 +27,9 @@ const getCourseCompletion = async (studentId) => {
       $group: {
         _id: "$course",
         total: { $sum: 1 },
-        completed: { $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] } },
+        completed: {
+          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
       },
     },
     {
@@ -36,7 +39,12 @@ const getCourseCompletion = async (studentId) => {
           $cond: [
             { $eq: ["$total", 0] },
             0,
-            { $round: [{ $multiply: [{ $divide: ["$completed", "$total"] }, 100] }, 2] },
+            {
+              $round: [
+                { $multiply: [{ $divide: ["$completed", "$total"] }, 100] },
+                2,
+              ],
+            },
           ],
         },
       },
@@ -51,7 +59,9 @@ const getSummary = async (studentId) => {
       $group: {
         _id: null,
         totalActivities: { $sum: 1 },
-        completedActivities: { $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] } },
+        completedActivities: {
+          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
         totalMinutes: { $sum: "$activityMinutes" },
         avgQuizScore: {
           $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
@@ -63,11 +73,16 @@ const getSummary = async (studentId) => {
   return {
     totalActivities: summary?.totalActivities || 0,
     completedActivities: summary?.completedActivities || 0,
-    totalHours: Number((((summary?.totalMinutes || 0) / 60) || 0).toFixed(2)),
+    totalHours: Number(((summary?.totalMinutes || 0) / 60 || 0).toFixed(2)),
     avgQuizScore: Number((summary?.avgQuizScore || 0).toFixed(2)),
     completionRate:
       summary?.totalActivities > 0
-        ? Number(((summary.completedActivities / summary.totalActivities) * 100).toFixed(2))
+        ? Number(
+            (
+              (summary.completedActivities / summary.totalActivities) *
+              100
+            ).toFixed(2),
+          )
         : 0,
   };
 };
@@ -120,7 +135,9 @@ export const getStudentOnboarding = catchAsync(async (req, res) => {
 export const getStudentHome = catchAsync(async (req, res) => {
   const student = await ensureStudent(req.user._id);
 
-  const gradeLevel = normalizeGradeLevel(req.query.gradeLevel || student.gradeLevel);
+  const gradeLevel = normalizeGradeLevel(
+    req.query.gradeLevel || student.gradeLevel,
+  );
   const search = req.query.search ? String(req.query.search).trim() : "";
 
   const courseFilter = {
@@ -128,7 +145,10 @@ export const getStudentHome = catchAsync(async (req, res) => {
     $or: [{ gradeLevels: gradeLevel }, { gradeLevels: { $size: 0 } }],
   };
   if (search) {
-    const regex = new RegExp(search.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&"), "i");
+    const regex = new RegExp(
+      search.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&"),
+      "i",
+    );
     courseFilter.$and = [{ $or: [{ name: regex }, { description: regex }] }];
   }
 
@@ -155,14 +175,25 @@ export const getStudentHome = catchAsync(async (req, res) => {
   }
 
   const courseCompletion = await getCourseCompletion(student._id);
-  const completionMap = new Map(courseCompletion.map((item) => [String(item.courseId), item.completionRate]));
+  const completionMap = new Map(
+    courseCompletion.map((item) => [
+      String(item.courseId),
+      item.completionRate,
+    ]),
+  );
 
   const lessonsByCourse = new Map();
   for (const lesson of lessons) {
     const key = String(lesson.course);
     if (!lessonsByCourse.has(key)) lessonsByCourse.set(key, []);
 
-    const activities = ["get_ready", "learn", "practice", "quiz", "resource"].map((activityType) => {
+    const activities = [
+      "get_ready",
+      "learn",
+      "practice",
+      "quiz",
+      "resource",
+    ].map((activityType) => {
       const record = progressMap.get(`${lesson._id}_${activityType}`);
       return {
         activityType,
@@ -219,7 +250,10 @@ export const getStudentCourseContent = catchAsync(async (req, res, next) => {
     .sort({ strand: 1, subStrand: 1, lessonNumber: 1 })
     .lean();
 
-  const progress = await Progress.find({ student: student._id, course: course._id }).lean();
+  const progress = await Progress.find({
+    student: student._id,
+    course: course._id,
+  }).lean();
 
   sendResponse(res, {
     statusCode: 200,
@@ -300,7 +334,9 @@ export const getStudentProgress = catchAsync(async (req, res) => {
       $group: {
         _id: "$course",
         totalActivities: { $sum: 1 },
-        completedActivities: { $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] } },
+        completedActivities: {
+          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
         totalMinutes: { $sum: "$activityMinutes" },
         avgQuizScore: {
           $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
@@ -330,7 +366,12 @@ export const getStudentProgress = catchAsync(async (req, res) => {
             0,
             {
               $round: [
-                { $multiply: [{ $divide: ["$completedActivities", "$totalActivities"] }, 100] },
+                {
+                  $multiply: [
+                    { $divide: ["$completedActivities", "$totalActivities"] },
+                    100,
+                  ],
+                },
                 2,
               ],
             },
@@ -377,10 +418,19 @@ export const getStudentSubjectProgress = catchAsync(async (req, res, next) => {
 
   const summary = {
     totalActivities: activities.length,
-    completedActivities: activities.filter((item) => item.status === "completed").length,
+    completedActivities: activities.filter(
+      (item) => item.status === "completed",
+    ).length,
     avgQuizScore:
-      activities.filter((item) => item.activityType === "quiz" && item.score !== null).reduce((acc, item) => acc + item.score, 0) /
-        Math.max(activities.filter((item) => item.activityType === "quiz" && item.score !== null).length, 1),
+      activities
+        .filter((item) => item.activityType === "quiz" && item.score !== null)
+        .reduce((acc, item) => acc + item.score, 0) /
+      Math.max(
+        activities.filter(
+          (item) => item.activityType === "quiz" && item.score !== null,
+        ).length,
+        1,
+      ),
   };
 
   sendResponse(res, {
@@ -429,8 +479,27 @@ export const updateStudentProfile = catchAsync(async (req, res) => {
     user.name = req.body.name;
   }
 
-  if (req.body.picture) student.picture = req.body.picture;
-  if (req.body.file) student.file = req.body.file;
+  if (req.files?.picture) {
+    const upload = await uploadOnCloudinary(
+      req.files.picture[0].buffer,
+      "student_profiles",
+    );
+    student.picture = {
+      public_id: upload.public_id,
+      url: upload.secure_url,
+    };
+  }
+
+  if (req.files?.file) {
+    const upload = await uploadOnCloudinary(
+      req.files.file[0].buffer,
+      "student_files",
+    );
+    student.file = {
+      public_id: upload.public_id,
+      url: upload.secure_url,
+    };
+  }
 
   await Promise.all([student.save(), user.save()]);
 

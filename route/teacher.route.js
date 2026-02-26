@@ -12,6 +12,7 @@ import {
   updateTeacherProfile,
 } from "../controllers/teacher.controller.js";
 import { protect, restrictTo } from "../middleware/auth.middleware.js";
+import upload from "../middleware/multer.middleware.js";
 
 const router = express.Router();
 
@@ -27,7 +28,11 @@ router.get("/privacy-policy", getTeacherPrivacyPolicy);
 router.post("/support", createTeacherSupportTicket);
 
 router.get("/profile", getTeacherProfile);
-router.patch("/profile", updateTeacherProfile);
+router.patch(
+  "/profile",
+  upload.fields([{ name: "picture" }, { name: "file" }]),
+  updateTeacherProfile,
+);
 router.patch("/change-password", changeTeacherPassword);
 
 export default router;

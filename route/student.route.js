@@ -27,7 +27,11 @@ router.get("/progress", getStudentProgress);
 router.get("/progress/subject/:courseId", getStudentSubjectProgress);
 
 router.get("/profile", getStudentProfile);
-router.patch("/profile", updateStudentProfile);
+router.patch(
+  "/profile",
+  upload.fields([{ name: "picture" }, { name: "file" }]),
+  updateStudentProfile,
+);
 
 router.get("/privacy-policy", getStudentPrivacyPolicy);
 router.post("/support", createStudentSupportTicket);

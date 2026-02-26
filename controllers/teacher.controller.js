@@ -9,12 +9,20 @@ import { normalizeGradeLevel } from "../utils/grade.js";
 import { parsePagination, getPaginationMeta } from "../utils/pagination.js";
 import catchAsync from "../utils/catchAsync.js";
 import sendResponse from "../utils/sendResponse.js";
+import { uploadOnCloudinary } from "../utils/commonMethod.js";
 
 const buildSearchRegex = (value) =>
-  new RegExp(String(value).trim().replace(/[.*+?^${}()|[\\]\\]/g, "\\$&"), "i");
+  new RegExp(
+    String(value)
+      .trim()
+      .replace(/[.*+?^${}()|[\\]\\]/g, "\\$&"),
+    "i",
+  );
 
 const getTeacherDoc = async (userId) =>
-  Teacher.findOne({ user: userId }).populate("courses", "name").populate("school", "name schoolCode");
+  Teacher.findOne({ user: userId })
+    .populate("courses", "name")
+    .populate("school", "name schoolCode");
 
 const getStudentProgressSummary = async (studentId) => {
   const [summary] = await Progress.aggregate([
@@ -23,7 +31,9 @@ const getStudentProgressSummary = async (studentId) => {
       $group: {
         _id: null,
         totalActivities: { $sum: 1 },
-        completedActivities: { $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] } },
+        completedActivities: {
+          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
         totalMinutes: { $sum: "$activityMinutes" },
         avgQuizScore: {
           $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
@@ -38,7 +48,9 @@ const getStudentProgressSummary = async (studentId) => {
       $group: {
         _id: "$course",
         total: { $sum: 1 },
-        completed: { $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] } },
+        completed: {
+          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
       },
     },
     {
@@ -58,7 +70,12 @@ const getStudentProgressSummary = async (studentId) => {
           $cond: [
             { $eq: ["$total", 0] },
             0,
-            { $round: [{ $multiply: [{ $divide: ["$completed", "$total"] }, 100] }, 2] },
+            {
+              $round: [
+                { $multiply: [{ $divide: ["$completed", "$total"] }, 100] },
+                2,
+              ],
+            },
           ],
         },
       },
@@ -69,11 +86,16 @@ const getStudentProgressSummary = async (studentId) => {
     summary: {
       totalActivities: summary?.totalActivities || 0,
       completedActivities: summary?.completedActivities || 0,
-      totalHours: Number((((summary?.totalMinutes || 0) / 60) || 0).toFixed(2)),
+      totalHours: Number(((summary?.totalMinutes || 0) / 60 || 0).toFixed(2)),
       avgQuizScore: Number((summary?.avgQuizScore || 0).toFixed(2)),
       completionRate:
         summary?.totalActivities > 0
-          ? Number(((summary.completedActivities / summary.totalActivities) * 100).toFixed(2))
+          ? Number(
+              (
+                (summary.completedActivities / summary.totalActivities) *
+                100
+              ).toFixed(2),
+            )
           : 0,
     },
     subjectProgress: bySubject,
@@ -89,34 +111,45 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
     studentFilter.gradeLevel = teacher.gradeLevel;
   }
 
-  const [totalStudents, totalSubjects, totalCompleted, totalQuizCompleted, subjectOverview, studentsPerWeek] =
-    await Promise.all([
-      Student.countDocuments(studentFilter),
-      teacher.courses?.length || 0,
-      Progress.countDocuments({ status: "completed" }),
-      Progress.countDocuments({ status: "completed", activityType: "quiz" }),
-      Progress.aggregate([
-        { $match: { status: "completed", course: { $in: (teacher.courses || []).map((c) => c._id) } } },
-        { $group: { _id: "$course", completed: { $sum: 1 } } },
-        {
-          $lookup: {
-            from: "courses",
-            localField: "_id",
-            foreignField: "_id",
-            as: "course",
-          },
+  const [
+    totalStudents,
+    totalSubjects,
+    totalCompleted,
+    totalQuizCompleted,
+    subjectOverview,
+    studentsPerWeek,
+  ] = await Promise.all([
+    Student.countDocuments(studentFilter),
+    teacher.courses?.length || 0,
+    Progress.countDocuments({ status: "completed" }),
+    Progress.countDocuments({ status: "completed", activityType: "quiz" }),
+    Progress.aggregate([
+      {
+        $match: {
+          status: "completed",
+          course: { $in: (teacher.courses || []).map((c) => c._id) },
         },
-        { $unwind: "$course" },
-        { $project: { _id: 0, subject: "$course.name", completed: 1 } },
-        { $sort: { completed: -1 } },
-      ]),
-      Progress.aggregate([
-        { $match: { status: "completed" } },
-        { $project: { weekday: { $dayOfWeek: "$performedAt" } } },
-        { $group: { _id: "$weekday", total: { $sum: 1 } } },
-        { $sort: { _id: 1 } },
-      ]),
-    ]);
+      },
+      { $group: { _id: "$course", completed: { $sum: 1 } } },
+      {
+        $lookup: {
+          from: "courses",
+          localField: "_id",
+          foreignField: "_id",
+          as: "course",
+        },
+      },
+      { $unwind: "$course" },
+      { $project: { _id: 0, subject: "$course.name", completed: 1 } },
+      { $sort: { completed: -1 } },
+    ]),
+    Progress.aggregate([
+      { $match: { status: "completed" } },
+      { $project: { weekday: { $dayOfWeek: "$performedAt" } } },
+      { $group: { _id: "$weekday", total: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+    ]),
+  ]);
 
   const weekMap = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const weeklyStudents = weekMap.map((day, idx) => ({
@@ -157,8 +190,10 @@ export const getTeacherStudents = catchAsync(async (req, res, next) => {
   const filter = { school: teacher.school?._id };
 
   if (req.query.status) filter.status = req.query.status;
-  if (req.query.gradeLevel) filter.gradeLevel = normalizeGradeLevel(req.query.gradeLevel);
-  if (!req.query.gradeLevel && teacher.gradeLevel) filter.gradeLevel = teacher.gradeLevel;
+  if (req.query.gradeLevel)
+    filter.gradeLevel = normalizeGradeLevel(req.query.gradeLevel);
+  if (!req.query.gradeLevel && teacher.gradeLevel)
+    filter.gradeLevel = teacher.gradeLevel;
 
   if (req.query.search) {
     const regex = buildSearchRegex(req.query.search);
@@ -167,7 +202,8 @@ export const getTeacherStudents = catchAsync(async (req, res, next) => {
       { _id: 1 },
     );
     filter.$or = [{ name: regex }];
-    if (users.length) filter.$or.push({ user: { $in: users.map((u) => u._id) } });
+    if (users.length)
+      filter.$or.push({ user: { $in: users.map((u) => u._id) } });
   }
 
   const [items, total] = await Promise.all([
@@ -203,7 +239,10 @@ export const getTeacherStudentById = catchAsync(async (req, res, next) => {
   const teacher = await getTeacherDoc(req.user._id);
   if (!teacher) return next(new AppError(404, "Teacher profile not found"));
 
-  const student = await Student.findOne({ _id: req.params.studentId, school: teacher.school?._id })
+  const student = await Student.findOne({
+    _id: req.params.studentId,
+    school: teacher.school?._id,
+  })
     .populate("school", "name schoolCode")
     .populate("user", "name userId")
     .lean();
@@ -302,7 +341,25 @@ export const updateTeacherProfile = catchAsync(async (req, res) => {
 
   if (payload.email) payload.email = String(payload.email).trim().toLowerCase();
 
-  const user = await User.findByIdAndUpdate(req.user._id, payload, { new: true });
+  if (req.files?.profile) {
+    const upload = await uploadOnCloudinary(
+      req.files.profile[0].buffer,
+      "teacher_profiles",
+    );
+    payload.profile = { public_id: upload.public_id, url: upload.secure_url };
+  }
+
+  if (req.files?.file) {
+    const upload = await uploadOnCloudinary(
+      req.files.file[0].buffer,
+      "teacher_files",
+    );
+    payload.file = { public_id: upload.public_id, url: upload.secure_url };
+  }
+
+  const user = await User.findByIdAndUpdate(req.user._id, payload, {
+    new: true,
+  });
   const teacher = await Teacher.findOneAndUpdate(
     { user: req.user._id },
     { name: payload.name || req.body.teacherName || undefined },
@@ -321,7 +378,12 @@ export const changeTeacherPassword = catchAsync(async (req, res, next) => {
   const { currentPassword, newPassword, confirmPassword } = req.body;
 
   if (!currentPassword || !newPassword || !confirmPassword) {
-    return next(new AppError(400, "currentPassword, newPassword and confirmPassword are required"));
+    return next(
+      new AppError(
+        400,
+        "currentPassword, newPassword and confirmPassword are required",
+      ),
+    );
   }
 
   if (newPassword !== confirmPassword) {

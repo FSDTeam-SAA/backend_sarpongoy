@@ -41,6 +41,10 @@ const userSchema = new Schema(
       type: String,
       enum: ["JHS 1", "JHS 2", "JHS 3", "SS 1", "SS 2", "SS 3", "SS 4", "SS 5"],
     },
+    profile: {
+      public_id: { type: String, default: "" },
+      url: { type: String, default: "" },
+    },
     verificationInfo: {
       verified: { type: Boolean, default: false },
       token: { type: String, default: "" },
@@ -68,7 +72,9 @@ userSchema.pre("save", async function userPreSave(next) {
   next();
 });
 
-userSchema.statics.isUserExistsByEmail = async function isUserExistsByEmail(email) {
+userSchema.statics.isUserExistsByEmail = async function isUserExistsByEmail(
+  email,
+) {
   return this.findOne({ email }).select("+password");
 };
 
