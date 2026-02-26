@@ -12,6 +12,7 @@ import {
   updateStudentProfile,
 } from "../controllers/student.controller.js";
 import { protect, restrictTo } from "../middleware/auth.middleware.js";
+import upload from "../middleware/multer.middleware.js";
 
 const router = express.Router();
 
