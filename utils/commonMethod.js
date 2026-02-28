@@ -3,10 +3,14 @@ import bcrypt from "bcryptjs";
 import { v4 as uuidv4 } from "uuid";
 import { v2 as cloudinary } from "cloudinary";
 import nodemailer from "nodemailer";
+import dotenv from "dotenv";
 
+dotenv.config();
 export const generateOTP = () => {
   const OTP_LENGTH = 6;
-  return Array.from({ length: OTP_LENGTH }, () => crypto.randomInt(0, 10)).join("");
+  return Array.from({ length: OTP_LENGTH }, () => crypto.randomInt(0, 10)).join(
+    "",
+  );
 };
 
 export const generateUniqueId = () => {
@@ -35,7 +39,10 @@ const transporter = nodemailer.createTransport({
 });
 
 export const sendOTP = async (email, code) => {
-  if (!process.env.EMAIL_USER || !(process.env.EMAIL_PASSWORD || process.env.EMAIL_PASS)) {
+  if (
+    !process.env.EMAIL_USER ||
+    !(process.env.EMAIL_PASSWORD || process.env.EMAIL_PASS)
+  ) {
     console.log("Email OTP skipped: missing SMTP credentials", { email, code });
     return;
   }
@@ -56,10 +63,13 @@ cloudinary.config({
 
 export const uploadOnCloudinary = (fileBuffer, options = {}) => {
   return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream({ ...options }, (error, result) => {
-      if (error) return reject(error);
-      resolve(result);
-    });
+    const stream = cloudinary.uploader.upload_stream(
+      { ...options },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result);
+      },
+    );
     stream.end(fileBuffer);
   });
 };

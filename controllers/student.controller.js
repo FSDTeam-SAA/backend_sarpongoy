@@ -479,25 +479,24 @@ export const updateStudentProfile = catchAsync(async (req, res) => {
     user.name = req.body.name;
   }
 
-  if (req.files?.picture) {
+  // Upload profile image
+  if (req.files?.picture?.[0]) {
     const upload = await uploadOnCloudinary(
       req.files.picture[0].buffer,
-      "student_profiles",
+      "profiles",
     );
     student.picture = {
-      public_id: upload.public_id,
       url: upload.secure_url,
+      public_id: upload.public_id,
     };
   }
 
-  if (req.files?.file) {
-    const upload = await uploadOnCloudinary(
-      req.files.file[0].buffer,
-      "student_files",
-    );
+  // Upload file
+  if (req.files?.file?.[0]) {
+    const upload = await uploadOnCloudinary(req.files.file[0].buffer, "files");
     student.file = {
-      public_id: upload.public_id,
       url: upload.secure_url,
+      public_id: upload.public_id,
     };
   }
 

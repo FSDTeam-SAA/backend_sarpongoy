@@ -341,20 +341,23 @@ export const updateTeacherProfile = catchAsync(async (req, res) => {
 
   if (payload.email) payload.email = String(payload.email).trim().toLowerCase();
 
-  if (req.files?.profile) {
+  if (req.files?.picture?.[0]) {
     const upload = await uploadOnCloudinary(
-      req.files.profile[0].buffer,
-      "teacher_profiles",
+      req.files.picture[0].buffer,
+      "profiles",
     );
-    payload.profile = { public_id: upload.public_id, url: upload.secure_url };
+    teacher.picture = {
+      url: upload.secure_url,
+      public_id: upload.public_id,
+    };
   }
 
-  if (req.files?.file) {
-    const upload = await uploadOnCloudinary(
-      req.files.file[0].buffer,
-      "teacher_files",
-    );
-    payload.file = { public_id: upload.public_id, url: upload.secure_url };
+  if (req.files?.file?.[0]) {
+    const upload = await uploadOnCloudinary(req.files.file[0].buffer, "files");
+    teacher.file = {
+      url: upload.secure_url,
+      public_id: upload.public_id,
+    };
   }
 
   const user = await User.findByIdAndUpdate(req.user._id, payload, {

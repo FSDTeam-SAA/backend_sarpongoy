@@ -14,6 +14,7 @@ import { DEFAULT_SECURITY_QUESTIONS } from "../utils/securityQuestions.js";
 import catchAsync from "../utils/catchAsync.js";
 import sendResponse from "../utils/sendResponse.js";
 import { uploadOnCloudinary } from "../utils/commonMethod.js";
+import mongoose from "mongoose";
 
 const buildSearchRegex = (value) =>
   new RegExp(
@@ -323,7 +324,9 @@ export const addNewStudent = catchAsync(async (req, res, next) => {
     return next(new AppError(400, "Passwords do not match"));
   }
 
-  const school = await ensureSchool({ schoolId, schoolName });
+  const validateId = mongoose.Types.ObjectId.isValid(schoolId);
+
+  const school = await ensureSchool({ validateId, schoolName });
   if (!school) {
     return next(new AppError(404, "School not found"));
   }
@@ -346,23 +349,23 @@ export const addNewStudent = catchAsync(async (req, res, next) => {
   const securityQuestions = await parseSecurityQuestions(req.body);
 
   const picture = {};
-  if (req.files?.profile) {
+  if (req.files?.picture?.[0]) {
     const uploadResult = await uploadOnCloudinary(
-      req.files.profile[0].buffer,
+      req.files.picture[0].buffer,
       "profiles",
     );
-    picture.url = uploadResult.url;
-    picture.public_Id = uploadResult.public_id;
+    picture.url = uploadResult.secure_url;
+    picture.public_id = uploadResult.public_id;
   }
 
   const file = {};
-  if (req.files?.file) {
+  if (req.files?.file?.[0]) {
     const uploadResult = await uploadOnCloudinary(
       req.files.file[0].buffer,
       "files",
     );
-    file.url = uploadResult.url;
-    file.public_Id = uploadResult.public_id;
+    file.url = uploadResult.secure_url;
+    file.public_id = uploadResult.public_id;
   }
 
   const student = await Student.create({
@@ -531,20 +534,23 @@ export const updateStudent = catchAsync(async (req, res, next) => {
   }
 
   // Upload profile image
-  if (req.files?.profile) {
-    const upload = await uploadOnCloudinary(req.files.profile[0].buffer);
-    student.profile = {
-      public_id: upload.public_id,
+  if (req.files?.picture?.[0]) {
+    const upload = await uploadOnCloudinary(
+      req.files.picture[0].buffer,
+      "profiles",
+    );
+    student.picture = {
       url: upload.secure_url,
+      public_id: upload.public_id,
     };
   }
 
   // Upload file
-  if (req.files?.file) {
-    const upload = await uploadOnCloudinary(req.files.file[0].buffer);
+  if (req.files?.file?.[0]) {
+    const upload = await uploadOnCloudinary(req.files.file[0].buffer, "files");
     student.file = {
-      public_id: upload.public_id,
       url: upload.secure_url,
+      public_id: upload.public_id,
     };
   }
 
@@ -652,17 +658,20 @@ export const addNewTeacher = catchAsync(async (req, res, next) => {
   });
 
   const picture = {};
-  if (req.files?.profile) {
-    const upload = await uploadOnCloudinary(req.files.profile[0].buffer);
-    picture.public_id = upload.public_id;
+  if (req.files?.picture?.[0]) {
+    const upload = await uploadOnCloudinary(
+      req.files.picture[0].buffer,
+      "profiles",
+    );
     picture.url = upload.secure_url;
+    picture.public_id = upload.public_id;
   }
 
   const file = {};
-  if (req.files?.file) {
-    const upload = await uploadOnCloudinary(req.files.file[0].buffer);
-    file.public_id = upload.public_id;
+  if (req.files?.file?.[0]) {
+    const upload = await uploadOnCloudinary(req.files.file[0].buffer, "files");
     file.url = upload.secure_url;
+    file.public_id = upload.public_id;
   }
 
   const teacher = await Teacher.create({
@@ -832,21 +841,21 @@ export const updateTeacher = catchAsync(async (req, res, next) => {
     teacher.courses = req.body.courseIds;
   }
 
-  if (req.files?.profile) {
-    const upload = await uploadOnCloudinary(req.files.profile[0].buffer);
-    teacher.picture = {
-      public_id: upload.public_id,
-      url: upload.secure_url,
-    };
-  }
+if (req.files?.picture?.[0]) {
+  const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
+  teacher.picture = {
+    url: upload.secure_url,
+    public_id: upload.public_id,
+  };
+}
 
-  if (req.files?.file) {
-    const upload = await uploadOnCloudinary(req.files.file[0].buffer);
-    teacher.file = {
-      public_id: upload.public_id,
-      url: upload.secure_url,
-    };
-  }
+if (req.files?.file?.[0]) {
+  const upload = await uploadOnCloudinary(req.files.file[0].buffer, "files");
+  teacher.file = {
+    url: upload.secure_url,
+    public_id: upload.public_id,
+  };
+}
 
   await Promise.all([teacher.save(), user.save()]);
   await syncSchoolCounts(teacher.school);
@@ -1237,13 +1246,13 @@ export const updateMyProfile = catchAsync(async (req, res) => {
     payload.email = String(payload.email).trim().toLowerCase();
   }
 
-  const profile = {};
-  if (req.files?.profile) {
-    const upload = await uploadOnCloudinary(req.files.profile[0].buffer);
-    profile.public_id = upload.public_id;
-    profile.url = upload.secure_url;
-    payload.profile = profile;
-  }
+if (req.files?.picture?.[0]) {
+  const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
+  payload.profile = {
+    url: upload.secure_url,
+    public_id: upload.public_id,
+  };
+}
 
   const user = await User.findByIdAndUpdate(req.user._id, payload, {
     new: true,
