@@ -6,6 +6,8 @@ const userSchema = new Schema(
     name: { type: String, trim: true },
     firstName: { type: String, trim: true },
     lastName: { type: String, trim: true },
+    phone: { type: String, trim: true },
+    bio: { type: String, trim: true },
     email: {
       type: String,
       trim: true,
@@ -69,6 +71,18 @@ userSchema.pre("save", async function userPreSave(next) {
 
   const saltRounds = Number(process.env.bcrypt_salt_round) || 10;
   this.password = await bcrypt.hash(this.password, saltRounds);
+  next();
+});
+
+userSchema.pre("findOneAndUpdate", function (next) {
+  const update = this.getUpdate();
+
+  if (update.firstName || update.lastName) {
+    const firstName = update.firstName || "";
+    const lastName = update.lastName || "";
+    update.name = `${firstName} ${lastName}`.trim();
+  }
+
   next();
 });
 

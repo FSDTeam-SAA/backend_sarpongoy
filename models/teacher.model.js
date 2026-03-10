@@ -25,6 +25,16 @@ const teacherSchema = new Schema(
       unique: true,
       index: true,
     },
+    firstName: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    lastName: {
+      type: String,
+      required: true,
+      trim: true,
+    },
     school: {
       type: Schema.Types.ObjectId,
       ref: "School",
@@ -40,6 +50,14 @@ const teacherSchema = new Schema(
     name: {
       type: String,
       required: true,
+      trim: true,
+    },
+    bio: {
+      type: String,
+      trim: true,
+    },
+    phone: {
+      type: String,
       trim: true,
     },
     gradeLevel: {
@@ -68,5 +86,17 @@ const teacherSchema = new Schema(
     timestamps: true,
   },
 );
+
+teacherSchema.pre("findOneAndUpdate", function (next) {
+  const update = this.getUpdate();
+
+  if (update.firstName || update.lastName) {
+    const firstName = update.firstName || "";
+    const lastName = update.lastName || "";
+    update.name = `${firstName} ${lastName}`.trim();
+  }
+
+  next();
+});
 
 export const Teacher = model("Teacher", teacherSchema);

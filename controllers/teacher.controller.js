@@ -335,11 +335,9 @@ export const getTeacherProfile = catchAsync(async (req, res) => {
 
 export const updateTeacherProfile = catchAsync(async (req, res) => {
   const payload = {};
-  for (const key of ["name", "firstName", "lastName", "email"]) {
+  for (const key of ["firstName", "lastName", "phone", "bio"]) {
     if (req.body[key] !== undefined) payload[key] = req.body[key];
   }
-
-  if (payload.email) payload.email = String(payload.email).trim().toLowerCase();
 
   if (req.files?.picture?.[0]) {
     const upload = await uploadOnCloudinary(
@@ -363,9 +361,9 @@ export const updateTeacherProfile = catchAsync(async (req, res) => {
   const user = await User.findByIdAndUpdate(req.user._id, payload, {
     new: true,
   });
-  const teacher = await Teacher.findOneAndUpdate(
+  const teacher = await Teacher.findByIdAndUpdate(
     { user: req.user._id },
-    { name: payload.name || req.body.teacherName || undefined },
+    { $set: payload },
     { new: true },
   );
 
