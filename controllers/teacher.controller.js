@@ -361,11 +361,11 @@ export const updateTeacherProfile = catchAsync(async (req, res) => {
   const user = await User.findByIdAndUpdate(req.user._id, payload, {
     new: true,
   });
-  const teacher = await Teacher.findByIdAndUpdate(
-    { user: req.user._id },
-    { $set: payload },
-    { new: true },
-  );
+const teacher = await Teacher.findOneAndUpdate(
+  { user: req.user._id },
+  { $set: payload },
+  { new: true },
+);
 
   sendResponse(res, {
     statusCode: 200,
