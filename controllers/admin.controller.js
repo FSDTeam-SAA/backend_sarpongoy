@@ -392,6 +392,7 @@ export const addNewStudent = catchAsync(async (req, res, next) => {
       schoolName: school.name,
       gradeLevel: student.gradeLevel,
       status: student.status,
+      picture: student.picture,
     },
   });
 });
