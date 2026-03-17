@@ -7,6 +7,7 @@ import {
   getTeacherPrivacyPolicy,
   getTeacherProfile,
   getTeacherStudentById,
+  getTeacherStudentOverview,
   getTeacherStudents,
   getTeacherSubjects,
   updateTeacherProfile,
@@ -22,6 +23,7 @@ router.get("/dashboard", getTeacherDashboard);
 router.get("/subjects", getTeacherSubjects);
 router.get("/courses/catalog", getTeacherCourseCatalog);
 router.get("/students", getTeacherStudents);
+router.get("/students/:studentId/overview", getTeacherStudentOverview);
 router.get("/students/:studentId", getTeacherStudentById);
 
 router.get("/privacy-policy", getTeacherPrivacyPolicy);

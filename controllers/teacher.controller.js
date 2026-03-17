@@ -24,9 +24,12 @@ const getTeacherDoc = async (userId) =>
     .populate("courses", "name")
     .populate("school", "name schoolCode");
 
-const getStudentProgressSummary = async (studentId) => {
+const getStudentProgressSummary = async (studentId, courseId = null) => {
+  const match = { student: studentId };
+  if (courseId) match.course = courseId;
+
   const [summary] = await Progress.aggregate([
-    { $match: { student: studentId } },
+    { $match: match },
     {
       $group: {
         _id: null,
@@ -43,7 +46,7 @@ const getStudentProgressSummary = async (studentId) => {
   ]);
 
   const bySubject = await Progress.aggregate([
-    { $match: { student: studentId } },
+    { $match: match },
     {
       $group: {
         _id: "$course",
@@ -88,6 +91,9 @@ const getStudentProgressSummary = async (studentId) => {
       completedActivities: summary?.completedActivities || 0,
       totalHours: Number(((summary?.totalMinutes || 0) / 60 || 0).toFixed(2)),
       avgQuizScore: Number((summary?.avgQuizScore || 0).toFixed(2)),
+      avgDailyHours: Number(
+        (((summary?.totalMinutes || 0) / 60 / 7) || 0).toFixed(2),
+      ),
       completionRate:
         summary?.totalActivities > 0
           ? Number(
@@ -102,6 +108,186 @@ const getStudentProgressSummary = async (studentId) => {
   };
 };
 
+const getCourseWiseOverview = async (studentId, courseId = null) => {
+  const match = { student: studentId };
+  if (courseId) match.course = courseId;
+
+  return Progress.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: "$course",
+        totalActivities: { $sum: 1 },
+        completedActivities: {
+          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
+        totalMinutes: { $sum: "$activityMinutes" },
+        avgQuizScore: {
+          $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: "courses",
+        localField: "_id",
+        foreignField: "_id",
+        as: "course",
+      },
+    },
+    { $unwind: "$course" },
+    {
+      $project: {
+        _id: 0,
+        courseId: "$course._id",
+        subject: "$course.name",
+        activityCount: "$totalActivities",
+        totalHours: { $round: [{ $divide: ["$totalMinutes", 60] }, 2] },
+        avgQuizScore: { $round: ["$avgQuizScore", 2] },
+        completionRate: {
+          $cond: [
+            { $eq: ["$totalActivities", 0] },
+            0,
+            {
+              $round: [
+                {
+                  $multiply: [
+                    { $divide: ["$completedActivities", "$totalActivities"] },
+                    100,
+                  ],
+                },
+                2,
+              ],
+            },
+          ],
+        },
+      },
+    },
+    { $sort: { subject: 1 } },
+  ]);
+};
+
+const buildWeeklyActivitySeries = async (match) => {
+  const now = new Date();
+  const startDate = new Date(now);
+  startDate.setDate(now.getDate() - 6);
+
+  const pipeline = [
+    {
+      $match: {
+        ...match,
+        performedAt: { $gte: startDate },
+      },
+    },
+    {
+      $group: {
+        _id: {
+          day: { $dateToString: { format: "%Y-%m-%d", date: "$performedAt" } },
+          weekday: { $dayOfWeek: "$performedAt" },
+        },
+        totalMinutes: { $sum: "$activityMinutes" },
+        activityCount: { $sum: 1 },
+        avgQuizScore: {
+          $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
+        },
+      },
+    },
+    {
+      $project: {
+        _id: 0,
+        date: "$_id.day",
+        weekday: "$_id.weekday",
+        activityCount: 1,
+        totalHours: { $round: [{ $divide: ["$totalMinutes", 60] }, 2] },
+        avgQuizScore: { $round: ["$avgQuizScore", 2] },
+      },
+    },
+    { $sort: { date: 1 } },
+  ];
+
+  const raw = await Progress.aggregate(pipeline);
+
+  const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const days = [];
+  for (let i = 6; i >= 0; i -= 1) {
+    const dateObj = new Date(now);
+    dateObj.setDate(now.getDate() - i);
+    const iso = dateObj.toISOString().slice(0, 10);
+    const found = raw.find((item) => item.date === iso);
+    days.push({
+      label: dayLabels[dateObj.getDay()],
+      date: iso,
+      activityCount: found?.activityCount || 0,
+      totalHours: found?.totalHours || 0,
+      avgQuizScore: found?.avgQuizScore || 0,
+    });
+  }
+
+  const totals = days.reduce(
+    (acc, cur) => ({
+      activityCount: acc.activityCount + cur.activityCount,
+      totalHours: Number((acc.totalHours + cur.totalHours).toFixed(2)),
+      avgQuizScore:
+        acc.avgQuizScore + (Number(cur.avgQuizScore) || 0) / days.length,
+    }),
+    { activityCount: 0, totalHours: 0, avgQuizScore: 0 },
+  );
+
+  return {
+    days,
+    totals: {
+      ...totals,
+      avgQuizScore: Number(totals.avgQuizScore.toFixed(2)),
+      avgDailyHours: Number((totals.totalHours / days.length).toFixed(2)),
+    },
+  };
+};
+
+const getMonthlyCompletionByCourse = async (courseIds) => {
+  if (!courseIds.length) return [];
+
+  const docs = await Progress.aggregate([
+    {
+      $match: {
+        status: "completed",
+        course: { $in: courseIds },
+      },
+    },
+    {
+      $group: {
+        _id: {
+          course: "$course",
+          year: { $year: "$performedAt" },
+          month: { $month: "$performedAt" },
+        },
+        completed: { $sum: 1 },
+      },
+    },
+    {
+      $lookup: {
+        from: "courses",
+        localField: "_id.course",
+        foreignField: "_id",
+        as: "course",
+      },
+    },
+    { $unwind: "$course" },
+    {
+      $project: {
+        _id: 0,
+        courseId: "$course._id",
+        subject: "$course.name",
+        year: "$_id.year",
+        month: "$_id.month",
+        completed: 1,
+      },
+    },
+    { $sort: { year: 1, month: 1 } },
+  ]);
+
+  return docs;
+};
+
 export const getTeacherDashboard = catchAsync(async (req, res, next) => {
   const teacher = await getTeacherDoc(req.user._id);
   if (!teacher) return next(new AppError(404, "Teacher profile not found"));
@@ -111,6 +297,12 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
     studentFilter.gradeLevel = teacher.gradeLevel;
   }
 
+  const courseIds = (teacher.courses || []).map((c) => c._id);
+  const progressMatch = {
+    status: "completed",
+    course: { $in: courseIds },
+  };
+
   const [
     totalStudents,
     totalSubjects,
@@ -118,16 +310,16 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
     totalQuizCompleted,
     subjectOverview,
     studentsPerWeek,
+    monthlyCompletionTrend,
   ] = await Promise.all([
     Student.countDocuments(studentFilter),
     teacher.courses?.length || 0,
-    Progress.countDocuments({ status: "completed" }),
-    Progress.countDocuments({ status: "completed", activityType: "quiz" }),
+    Progress.countDocuments(progressMatch),
+    Progress.countDocuments({ ...progressMatch, activityType: "quiz" }),
     Progress.aggregate([
       {
         $match: {
-          status: "completed",
-          course: { $in: (teacher.courses || []).map((c) => c._id) },
+          ...progressMatch,
         },
       },
       { $group: { _id: "$course", completed: { $sum: 1 } } },
@@ -144,11 +336,12 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
       { $sort: { completed: -1 } },
     ]),
     Progress.aggregate([
-      { $match: { status: "completed" } },
+      { $match: { status: "completed", course: { $in: courseIds } } },
       { $project: { weekday: { $dayOfWeek: "$performedAt" } } },
       { $group: { _id: "$weekday", total: { $sum: 1 } } },
       { $sort: { _id: 1 } },
     ]),
+    getMonthlyCompletionByCourse(courseIds),
   ]);
 
   const weekMap = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -177,6 +370,7 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
       charts: {
         subjectOverview,
         weeklyStudents,
+        monthlyCompletionTrend,
       },
     },
   });
@@ -270,6 +464,114 @@ export const getTeacherStudentById = catchAsync(async (req, res, next) => {
   });
 });
 
+export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
+  const teacher = await getTeacherDoc(req.user._id);
+  if (!teacher) return next(new AppError(404, "Teacher profile not found"));
+
+  const { courseId } = req.query;
+  if (courseId) {
+    const hasCourse = (teacher.courses || []).some(
+      (c) => String(c._id) === String(courseId),
+    );
+    if (!hasCourse) {
+      return next(new AppError(403, "Course not assigned to this teacher"));
+    }
+  }
+
+  const student = await Student.findOne({
+    _id: req.params.studentId,
+    school: teacher.school?._id,
+  })
+    .populate("school", "name schoolCode")
+    .populate("user", "name userId status")
+    .lean();
+
+  if (!student) return next(new AppError(404, "Student not found"));
+
+  const matchBase = { student: student._id };
+  if (courseId) matchBase.course = courseId;
+
+  const [
+    progressSheet,
+    courseWiseOverview,
+    weeklyActivity,
+    recentWork,
+    activityBreakdown,
+  ] =
+    await Promise.all([
+      getStudentProgressSummary(student._id, courseId),
+      getCourseWiseOverview(student._id, courseId),
+      buildWeeklyActivitySeries(matchBase),
+      Progress.find(matchBase)
+        .populate("course", "name")
+        .populate("lesson", "title strand subStrand lessonNumber")
+        .sort({ performedAt: -1 })
+        .limit(10)
+        .lean(),
+      Progress.aggregate([
+        { $match: matchBase },
+        {
+          $group: {
+            _id: "$activityType",
+            total: { $sum: 1 },
+            completed: {
+              $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+            },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            activityType: "$_id",
+            total: 1,
+            completed: 1,
+          },
+        },
+      ]),
+    ]);
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Student overview fetched successfully",
+    data: {
+      student: {
+        _id: student._id,
+        studentName: student.name,
+        userId: student.user?.userId,
+        schoolName: student.school?.name,
+        schoolCode: student.school?.schoolCode,
+        gradeLevel: student.gradeLevel,
+        status: student.status,
+        picture: student.picture,
+      },
+      overview: {
+        summary: progressSheet.summary,
+        subjectProgress: progressSheet.subjectProgress,
+        courseWiseOverview,
+        weeklyActivity,
+        activityBreakdown,
+        recentWork: recentWork.map((item) => ({
+          _id: item._id,
+          subject: item.course?.name,
+          activityType: item.activityType,
+          status: item.status,
+          score: item.score,
+          performedAt: item.performedAt,
+          lesson: item.lesson
+            ? {
+                title: item.lesson.title,
+                strand: item.lesson.strand,
+                subStrand: item.lesson.subStrand,
+                lessonNumber: item.lesson.lessonNumber,
+              }
+            : null,
+        })),
+      },
+    },
+  });
+});
+
 export const getTeacherSubjects = catchAsync(async (req, res, next) => {
   const teacher = await getTeacherDoc(req.user._id);
   if (!teacher) return next(new AppError(404, "Teacher profile not found"));
@@ -333,10 +635,19 @@ export const getTeacherProfile = catchAsync(async (req, res) => {
   });
 });
 
-export const updateTeacherProfile = catchAsync(async (req, res) => {
-  const payload = {};
+export const updateTeacherProfile = catchAsync(async (req, res, next) => {
+  const userPayload = {};
+  const teacherPayload = {};
   for (const key of ["firstName", "lastName", "phone", "bio"]) {
-    if (req.body[key] !== undefined) payload[key] = req.body[key];
+    if (req.body[key] !== undefined) {
+      userPayload[key] = req.body[key];
+      teacherPayload[key] = req.body[key];
+    }
+  }
+
+  const teacherDoc = await Teacher.findOne({ user: req.user._id });
+  if (!teacherDoc) {
+    return next(new AppError(404, "Teacher profile not found"));
   }
 
   if (req.files?.picture?.[0]) {
@@ -344,7 +655,7 @@ export const updateTeacherProfile = catchAsync(async (req, res) => {
       req.files.picture[0].buffer,
       "profiles",
     );
-    teacher.picture = {
+    teacherPayload.picture = {
       url: upload.secure_url,
       public_id: upload.public_id,
     };
@@ -352,20 +663,22 @@ export const updateTeacherProfile = catchAsync(async (req, res) => {
 
   if (req.files?.file?.[0]) {
     const upload = await uploadOnCloudinary(req.files.file[0].buffer, "files");
-    teacher.file = {
+    teacherPayload.file = {
       url: upload.secure_url,
       public_id: upload.public_id,
     };
   }
 
-  const user = await User.findByIdAndUpdate(req.user._id, payload, {
-    new: true,
-  });
-const teacher = await Teacher.findOneAndUpdate(
-  { user: req.user._id },
-  { $set: payload },
-  { new: true },
-);
+  const [user, teacher] = await Promise.all([
+    User.findByIdAndUpdate(req.user._id, userPayload, {
+      new: true,
+    }),
+    Teacher.findOneAndUpdate(
+      { user: req.user._id },
+      { $set: teacherPayload },
+      { new: true },
+    ),
+  ]);
 
   sendResponse(res, {
     statusCode: 200,
