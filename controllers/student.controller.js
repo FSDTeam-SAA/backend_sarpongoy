@@ -9,6 +9,7 @@ import { normalizeGradeLevel } from "../utils/grade.js";
 import catchAsync from "../utils/catchAsync.js";
 import sendResponse from "../utils/sendResponse.js";
 import { uploadOnCloudinary } from "../utils/commonMethod.js";
+import mongoose from "mongoose";
 
 const ensureStudent = async (userId) => {
   const student = await Student.findOne({ user: userId })
@@ -269,7 +270,8 @@ export const getStudentCourseContent = catchAsync(async (req, res, next) => {
 
 export const saveStudentActivity = catchAsync(async (req, res, next) => {
   const student = await ensureStudent(req.user._id);
-  const { lessonId, activityType, status, score, activityMinutes } = req.body;
+  const { lessonId, activityType, subActivity, status, score, activityMinutes } =
+    req.body;
 
   if (!lessonId || !activityType) {
     return next(new AppError(400, "lessonId and activityType are required"));
@@ -282,6 +284,9 @@ export const saveStudentActivity = catchAsync(async (req, res, next) => {
     status: status || "in_progress",
     activityMinutes: Number(activityMinutes || 0),
     performedAt: new Date(),
+    subActivity: subActivity || null,
+    lessonId,
+    lastUpdated: new Date(),
   };
 
   if (score !== undefined) {
@@ -302,6 +307,10 @@ export const saveStudentActivity = catchAsync(async (req, res, next) => {
       $set: {
         ...update,
         course: lesson.course,
+        strandName: lesson.strand,
+        subStrandName: lesson.subStrand,
+        lessonNumber: String(lesson.lessonNumber),
+        gradeName: lesson.gradeLevel,
       },
       $setOnInsert: {
         student: student._id,
@@ -321,6 +330,123 @@ export const saveStudentActivity = catchAsync(async (req, res, next) => {
     success: true,
     message: "Activity saved successfully",
     data: progress,
+  });
+});
+
+export const syncStudentActivities = catchAsync(async (req, res, next) => {
+  const student = await ensureStudent(req.user._id);
+  const activities = Array.isArray(req.body.activities)
+    ? req.body.activities
+    : [];
+
+  if (!activities.length) {
+    return next(new AppError(400, "activities array is required"));
+  }
+
+  let saved = 0;
+  const errors = [];
+
+  for (let idx = 0; idx < activities.length; idx += 1) {
+    const item = activities[idx] || {};
+    const lessonId = item.lesson_id || item.lessonId || item.lesson;
+    const activityType = String(item.activity_type || item.activityType || "")
+      .trim()
+      .toLowerCase();
+
+    if (!lessonId || !activityType) {
+      errors.push({ index: idx, reason: "lesson_id and activity_type are required" });
+      continue;
+    }
+
+    let lessonDoc = null;
+    if (mongoose.Types.ObjectId.isValid(lessonId)) {
+      lessonDoc = await Lesson.findById(lessonId);
+    }
+
+    // fallback search using metadata when lesson id is not a valid ObjectId or not found
+    if (!lessonDoc && item.course_name) {
+      const courseDoc = await Course.findOne({
+        name: String(item.course_name).trim(),
+      });
+
+      if (courseDoc) {
+        const lessonQuery = {
+          course: courseDoc._id,
+          gradeLevel: normalizeGradeLevel(item.grade_name || student.gradeLevel),
+          strand: item.strand_name,
+          subStrand: item.sub_strand_name,
+        };
+        if (item.lesson_number) {
+          lessonQuery.lessonNumber = Number(item.lesson_number);
+        }
+        lessonDoc = await Lesson.findOne(lessonQuery);
+      }
+    }
+
+    if (!lessonDoc) {
+      errors.push({ index: idx, lessonId, reason: "Lesson not found" });
+      continue;
+    }
+
+    const status =
+      Number(item.is_completed) === 1 || item.is_completed === true
+        ? "completed"
+        : "in_progress";
+    const lastUpdated = item.last_updated ? new Date(item.last_updated) : new Date();
+
+    const payload = {
+      student: student._id,
+      course: lessonDoc.course,
+      courseName: item.course_name || undefined,
+      lesson: lessonDoc._id,
+      lessonId: lessonId,
+      strandName: item.strand_name || lessonDoc.strand,
+      subStrandName: item.sub_strand_name || lessonDoc.subStrand,
+      lessonNumber: item.lesson_number || String(lessonDoc.lessonNumber),
+      gradeName: item.grade_name || student.gradeLevel,
+      activityType,
+      subActivity: item.sub_activity || null,
+      status,
+      score: item.score !== undefined ? Number(item.score) : null,
+      originalScore:
+        item.original_score !== undefined ? Number(item.original_score) : null,
+      totalQuestions:
+        item.total_questions !== undefined ? Number(item.total_questions) : null,
+      syncStatus: item.sync_status !== undefined ? Number(item.sync_status) : 1,
+      lastUpdated,
+      performedAt: lastUpdated,
+    };
+
+    if (status === "completed") {
+      payload.completedAt = lastUpdated;
+    }
+
+    try {
+      await Progress.findOneAndUpdate(
+        {
+          student: student._id,
+          lesson: lessonDoc._id,
+          activityType: payload.activityType,
+          subActivity: payload.subActivity,
+        },
+        { $set: payload },
+        { upsert: true, new: true, runValidators: true },
+      );
+      saved += 1;
+    } catch (error) {
+      errors.push({ index: idx, lessonId, reason: error.message });
+    }
+  }
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Activities synced successfully",
+    data: {
+      received: activities.length,
+      saved,
+      errors,
+    },
   });
 });
 

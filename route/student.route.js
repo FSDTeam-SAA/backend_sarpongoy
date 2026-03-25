@@ -9,6 +9,7 @@ import {
   getStudentProgress,
   getStudentSubjectProgress,
   saveStudentActivity,
+  syncStudentActivities,
   updateStudentProfile,
 } from "../controllers/student.controller.js";
 import { protect, restrictTo } from "../middleware/auth.middleware.js";
@@ -23,6 +24,7 @@ router.use(protect, restrictTo("student"));
 router.get("/home", getStudentHome);
 router.get("/courses/:courseId", getStudentCourseContent);
 router.post("/activities", saveStudentActivity);
+router.post("/activities/sync", syncStudentActivities);
 
 router.get("/progress", getStudentProgress);
 router.get("/progress/subject/:courseId", getStudentSubjectProgress);
