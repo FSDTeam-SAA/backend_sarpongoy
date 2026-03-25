@@ -339,6 +339,8 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
     ? req.body.activities
     : [];
 
+  const topLevelGrade = req.body.grade_name || null;
+
   if (!activities.length) {
     return next(new AppError(400, "activities array is required"));
   }
@@ -372,7 +374,9 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       if (courseDoc) {
         const lessonQuery = {
           course: courseDoc._id,
-          gradeLevel: normalizeGradeLevel(item.grade_name || student.gradeLevel),
+          gradeLevel: normalizeGradeLevel(
+            item.grade_name || topLevelGrade || student.gradeLevel,
+          ),
           strand: item.strand_name,
           subStrand: item.sub_strand_name,
         };
@@ -403,7 +407,7 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       strandName: item.strand_name || lessonDoc.strand,
       subStrandName: item.sub_strand_name || lessonDoc.subStrand,
       lessonNumber: item.lesson_number || String(lessonDoc.lessonNumber),
-      gradeName: item.grade_name || student.gradeLevel,
+      gradeName: item.grade_name || topLevelGrade || student.gradeLevel,
       activityType,
       subActivity: item.sub_activity || null,
       status,
