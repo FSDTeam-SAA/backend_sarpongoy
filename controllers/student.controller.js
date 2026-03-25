@@ -335,8 +335,8 @@ export const saveStudentActivity = catchAsync(async (req, res, next) => {
 
 export const syncStudentActivities = catchAsync(async (req, res, next) => {
   const student = await ensureStudent(req.user._id);
-  const activities = Array.isArray(req.body.activities)
-    ? req.body.activities
+  const activities = Array.isArray(req.body.progress_data)
+    ? req.body.progress_data
     : [];
 
   const topLevelGrade = req.body.grade_name || null;
@@ -355,42 +355,46 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       .trim()
       .toLowerCase();
 
+      console.log("item : ", item);
+      console.log("lessonId : ", lessonId);
+
     if (!lessonId || !activityType) {
       errors.push({ index: idx, reason: "lesson_id and activity_type are required" });
       continue;
     }
 
-    let lessonDoc = null;
-    if (mongoose.Types.ObjectId.isValid(lessonId)) {
-      lessonDoc = await Lesson.findById(lessonId);
-    }
+    // let lessonDoc = null;
+    // if (mongoose.Types.ObjectId.isValid(lessonId)) {
+    //   lessonDoc = await Lesson.findById(lessonId);
+    // }
 
     // fallback search using metadata when lesson id is not a valid ObjectId or not found
-    if (!lessonDoc && item.course_name) {
-      const courseDoc = await Course.findOne({
-        name: String(item.course_name).trim(),
-      });
+    // if (!lessonId && item.course_name) {
+    //   const courseDoc = await Course.findOne({
+    //     name: String(item.course_name).trim(),
+    //   });
 
-      if (courseDoc) {
-        const lessonQuery = {
-          course: courseDoc._id,
-          gradeLevel: normalizeGradeLevel(
-            item.grade_name || topLevelGrade || student.gradeLevel,
-          ),
-          strand: item.strand_name,
-          subStrand: item.sub_strand_name,
-        };
-        if (item.lesson_number) {
-          lessonQuery.lessonNumber = Number(item.lesson_number);
-        }
-        lessonDoc = await Lesson.findOne(lessonQuery);
-      }
-    }
+    //   if (courseDoc) {
+    //     const lessonQuery = {
+    //       course: courseDoc._id,
+    //       gradeLevel: normalizeGradeLevel(
+    //         item.grade_name || topLevelGrade || student.gradeLevel,
+    //       ),
+    //       strand: item.strand_name,
+    //       subStrand: item.sub_strand_name,
+    //     };
+    //     if (item.lesson_number) {
+    //       lessonQuery.lessonNumber = Number(item.lesson_number);
+    //     }
+    //     lessonDoc = await Lesson.findOne(lessonQuery);
+    //   }
+    // }
 
-    if (!lessonDoc) {
-      errors.push({ index: idx, lessonId, reason: "Lesson not found" });
-      continue;
-    }
+    // if (!lessonDoc) {
+    //   console.log("Reason for fail : ", lessonDoc);
+    //   errors.push({ index: idx, lessonId, reason: "Lesson not found" });
+    //   continue;
+    // }
 
     const status =
       Number(item.is_completed) === 1 || item.is_completed === true
@@ -400,14 +404,14 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
 
     const payload = {
       student: student._id,
-      course: lessonDoc.course,
+      // course: item.course,
       courseName: item.course_name || undefined,
-      lesson: lessonDoc._id,
+      // lesson: lessonDoc._id,
       lessonId: lessonId,
-      strandName: item.strand_name || lessonDoc.strand,
-      subStrandName: item.sub_strand_name || lessonDoc.subStrand,
-      lessonNumber: item.lesson_number || String(lessonDoc.lessonNumber),
-      gradeName: item.grade_name || topLevelGrade || student.gradeLevel,
+      strandName: item.strand_name,
+      subStrandName: item.sub_strand_name,
+      lessonNumber: item.lesson_number,
+      gradeName: item.grade_name,
       activityType,
       subActivity: item.sub_activity || null,
       status,
@@ -429,7 +433,7 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       await Progress.findOneAndUpdate(
         {
           student: student._id,
-          lesson: lessonDoc._id,
+          lessonId: lessonId,
           activityType: payload.activityType,
           subActivity: payload.subActivity,
         },
@@ -438,6 +442,7 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       );
       saved += 1;
     } catch (error) {
+      console.log("Reason for fail : ", error);
       errors.push({ index: idx, lessonId, reason: error.message });
     }
   }

@@ -8,22 +8,22 @@ const progressSchema = new Schema(
       required: true,
       index: true,
     },
-    course: {
-      type: Schema.Types.ObjectId,
-      ref: "Course",
-      required: true,
-      index: true,
-    },
+    // course: {
+    //   type: Schema.Types.ObjectId,
+    //   ref: "Course",
+    //   required: true,
+    //   index: true,
+    // },
     courseName: {
       type: String,
       trim: true,
     },
-    lesson: {
-      type: Schema.Types.ObjectId,
-      ref: "Lesson",
-      required: true,
-      index: true,
-    },
+    // lesson: {
+    //   type: Schema.Types.ObjectId,
+    //   ref: "Lesson",
+    //   required: true,
+    //   index: true,
+    // },
     lessonId: {
       // client-side lesson identifier to avoid casting errors when offline ids differ
       type: String,
