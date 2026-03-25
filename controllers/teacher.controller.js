@@ -1,4 +1,4 @@
-﻿import AppError from "../errors/AppError.js";
+import AppError from "../errors/AppError.js";
 import { Course } from "../models/course.model.js";
 import { Progress } from "../models/progress.model.js";
 import { Student } from "../models/student.model.js";
@@ -288,6 +288,110 @@ const getMonthlyCompletionByCourse = async (courseIds) => {
   return docs;
 };
 
+const getSubjectRecentWork = async (studentId, courseId = null) => {
+  const match = { student: studentId };
+  if (courseId) match.course = courseId;
+
+  return Progress.aggregate([
+    { $match: match },
+    { $sort: { performedAt: -1 } },
+    {
+      $group: {
+        _id: "$course",
+        activities: {
+          $push: {
+            type: "$activityType",
+            score: "$score",
+            originalScore: "$originalScore",
+            total: "$totalQuestions",
+          },
+        },
+      },
+    },
+    {
+      $project: {
+        practice: {
+          $arrayElemAt: [
+            {
+              $filter: {
+                input: "$activities",
+                as: "a",
+                cond: { $eq: ["$$a.type", "practice"] },
+              },
+            },
+            0,
+          ],
+        },
+        quiz: {
+          $arrayElemAt: [
+            {
+              $filter: {
+                input: "$activities",
+                as: "a",
+                cond: { $eq: ["$$a.type", "quiz"] },
+              },
+            },
+            0,
+          ],
+        },
+        quizzes: {
+          $filter: {
+            input: "$activities",
+            as: "a",
+            cond: {
+              $and: [{ $eq: ["$$a.type", "quiz"] }, { $ne: ["$$a.score", null] }],
+            },
+          },
+        },
+      },
+    },
+    {
+      $project: {
+        practice: 1,
+        quiz: 1,
+        lowestQuiz: {
+          $reduce: {
+            input: "$quizzes",
+            initialValue: null,
+            in: {
+              $cond: [
+                {
+                  $or: [
+                    { $eq: ["$$value", null] },
+                    { $lt: ["$$this.score", "$$value.score"] },
+                  ],
+                },
+                "$$this",
+                "$$value",
+              ],
+            },
+          },
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: "courses",
+        localField: "_id",
+        foreignField: "_id",
+        as: "course",
+      },
+    },
+    { $unwind: "$course" },
+    {
+      $project: {
+        _id: 0,
+        courseId: "$_id",
+        subject: "$course.name",
+        practice: 1,
+        quiz: 1,
+        lowestQuiz: 1,
+      },
+    },
+    { $sort: { subject: 1 } },
+  ]);
+};
+
 export const getTeacherDashboard = catchAsync(async (req, res, next) => {
   const teacher = await getTeacherDoc(req.user._id);
   if (!teacher) return next(new AppError(404, "Teacher profile not found"));
@@ -497,38 +601,39 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
     weeklyActivity,
     recentWork,
     activityBreakdown,
-  ] =
-    await Promise.all([
-      getStudentProgressSummary(student._id, courseId),
-      getCourseWiseOverview(student._id, courseId),
-      buildWeeklyActivitySeries(matchBase),
-      Progress.find(matchBase)
-        .populate("course", "name")
-        .populate("lesson", "title strand subStrand lessonNumber")
-        .sort({ performedAt: -1 })
-        .limit(10)
-        .lean(),
-      Progress.aggregate([
-        { $match: matchBase },
-        {
-          $group: {
-            _id: "$activityType",
-            total: { $sum: 1 },
-            completed: {
-              $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
-            },
+    subjectRecentWork,
+  ] = await Promise.all([
+    getStudentProgressSummary(student._id, courseId),
+    getCourseWiseOverview(student._id, courseId),
+    buildWeeklyActivitySeries(matchBase),
+    Progress.find(matchBase)
+      .populate("course", "name")
+      .populate("lesson", "title strand subStrand lessonNumber")
+      .sort({ performedAt: -1 })
+      .limit(10)
+      .lean(),
+    Progress.aggregate([
+      { $match: matchBase },
+      {
+        $group: {
+          _id: "$activityType",
+          total: { $sum: 1 },
+          completed: {
+            $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
           },
         },
-        {
-          $project: {
-            _id: 0,
-            activityType: "$_id",
-            total: 1,
-            completed: 1,
-          },
+      },
+      {
+        $project: {
+          _id: 0,
+          activityType: "$_id",
+          total: 1,
+          completed: 1,
         },
-      ]),
-    ]);
+      },
+    ]),
+    getSubjectRecentWork(student._id, courseId),
+  ]);
 
   sendResponse(res, {
     statusCode: 200,
@@ -551,6 +656,7 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
         courseWiseOverview,
         weeklyActivity,
         activityBreakdown,
+        subjectRecentWork,
         recentWork: recentWork.map((item) => ({
           _id: item._id,
           subject: item.course?.name,

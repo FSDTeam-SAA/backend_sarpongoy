@@ -1,4 +1,4 @@
-﻿import AppError from "../errors/AppError.js";
+import AppError from "../errors/AppError.js";
 import { Course } from "../models/course.model.js";
 import { Lesson } from "../models/lesson.model.js";
 import { Progress } from "../models/progress.model.js";
@@ -363,38 +363,44 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       continue;
     }
 
-    // let lessonDoc = null;
-    // if (mongoose.Types.ObjectId.isValid(lessonId)) {
-    //   lessonDoc = await Lesson.findById(lessonId);
-    // }
+    let lessonDoc = null;
+    let courseDoc = null;
 
-    // fallback search using metadata when lesson id is not a valid ObjectId or not found
-    // if (!lessonId && item.course_name) {
-    //   const courseDoc = await Course.findOne({
-    //     name: String(item.course_name).trim(),
-    //   });
+    if (mongoose.Types.ObjectId.isValid(lessonId)) {
+      lessonDoc = await Lesson.findById(lessonId);
+    }
 
-    //   if (courseDoc) {
-    //     const lessonQuery = {
-    //       course: courseDoc._id,
-    //       gradeLevel: normalizeGradeLevel(
-    //         item.grade_name || topLevelGrade || student.gradeLevel,
-    //       ),
-    //       strand: item.strand_name,
-    //       subStrand: item.sub_strand_name,
-    //     };
-    //     if (item.lesson_number) {
-    //       lessonQuery.lessonNumber = Number(item.lesson_number);
-    //     }
-    //     lessonDoc = await Lesson.findOne(lessonQuery);
-    //   }
-    // }
+    // fallback search using metadata if lesson is not found by ID
+    if (!lessonDoc && item.course_name) {
+      courseDoc = await Course.findOne({
+        name: String(item.course_name).trim(),
+      });
 
-    // if (!lessonDoc) {
-    //   console.log("Reason for fail : ", lessonDoc);
-    //   errors.push({ index: idx, lessonId, reason: "Lesson not found" });
-    //   continue;
-    // }
+      if (courseDoc) {
+        const lessonQuery = {
+          course: courseDoc._id,
+          gradeLevel: normalizeGradeLevel(
+            item.grade_name || topLevelGrade || student.gradeLevel,
+          ),
+          strand: item.strand_name,
+          subStrand: item.sub_strand_name,
+        };
+        if (item.lesson_number) {
+          lessonQuery.lessonNumber = String(item.lesson_number);
+        }
+        lessonDoc = await Lesson.findOne(lessonQuery);
+      }
+    }
+
+    if (!lessonDoc) {
+      errors.push({ index: idx, lessonId, reason: "Lesson not found in database. Matching failed." });
+      continue;
+    }
+
+    // If we found the lesson but didn't have the courseDoc, get it from the lesson
+    if (!courseDoc) {
+        courseDoc = await Course.findById(lessonDoc.course);
+    }
 
     const status =
       Number(item.is_completed) === 1 || item.is_completed === true
@@ -404,14 +410,14 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
 
     const payload = {
       student: student._id,
-      // course: item.course,
-      courseName: item.course_name || undefined,
-      // lesson: lessonDoc._id,
+      course: courseDoc?._id,
+      courseName: item.course_name || courseDoc?.name || undefined,
+      lesson: lessonDoc._id,
       lessonId: lessonId,
-      strandName: item.strand_name,
-      subStrandName: item.sub_strand_name,
-      lessonNumber: item.lesson_number,
-      gradeName: item.grade_name,
+      strandName: item.strand_name || lessonDoc.strand,
+      subStrandName: item.sub_strand_name || lessonDoc.subStrand,
+      lessonNumber: item.lesson_number || String(lessonDoc.lessonNumber),
+      gradeName: item.grade_name || lessonDoc.gradeLevel,
       activityType,
       subActivity: item.sub_activity || null,
       status,
@@ -433,7 +439,7 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       await Progress.findOneAndUpdate(
         {
           student: student._id,
-          lessonId: lessonId,
+          lesson: lessonDoc._id,
           activityType: payload.activityType,
           subActivity: payload.subActivity,
         },
