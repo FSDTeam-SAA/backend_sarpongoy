@@ -478,6 +478,7 @@ export const getStudentById = catchAsync(async (req, res, next) => {
         schoolCode: student.school?.schoolCode,
         gradeLevel: student.gradeLevel,
         status: student.status,
+        picture: student.picture || { url: "", public_id: "" },
       },
       progressSheet,
     },
@@ -782,6 +783,7 @@ export const getTeacherById = catchAsync(async (req, res, next) => {
       schoolCode: teacher.school?.schoolCode,
       gradeLevel: teacher.gradeLevel,
       status: teacher.status,
+      picture: teacher.picture || { url: "", public_id: "" },
       courses: teacher.courses || [],
     },
   });
