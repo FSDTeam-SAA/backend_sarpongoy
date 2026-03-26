@@ -17,10 +17,40 @@ const app = express();
 
 app.set("trust proxy", true);
 
+const collectOrigins = (...values) =>
+  [
+    ...new Set(
+      values
+        .flatMap((value) => String(value || "").split(","))
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ];
+
+const allowedOrigins = collectOrigins(
+  process.env.CORS_ORIGIN,
+  process.env.FRONTEND_URL,
+  process.env.SOCKET_IO_CORS_ORIGIN,
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+);
+
+const corsOriginHandler = (origin, callback) => {
+  // Allow non-browser clients (Postman/cURL) that do not send Origin.
+  if (!origin) return callback(null, true);
+
+  if (allowedOrigins.includes(origin)) {
+    return callback(null, true);
+  }
+
+  return callback(new Error(`CORS blocked for origin: ${origin}`));
+};
+
 const server = createServer(app);
 export const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: allowedOrigins,
+    credentials: true,
     methods: ["GET", "POST"],
   },
 });
@@ -28,8 +58,9 @@ export const io = new Server(server, {
 app.use(
   cors({
     credentials: true,
-    origin: "*",
+    origin: corsOriginHandler,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   }),
 );
 
