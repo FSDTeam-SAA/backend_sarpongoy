@@ -8,6 +8,7 @@ import { User } from "../models/user.model.js";
 import { normalizeGradeLevel } from "../utils/grade.js";
 import catchAsync from "../utils/catchAsync.js";
 import sendResponse from "../utils/sendResponse.js";
+import { parsePagination, getPaginationMeta } from "../utils/pagination.js";
 import { uploadOnCloudinary } from "../utils/commonMethod.js";
 import mongoose from "mongoose";
 
@@ -370,26 +371,33 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       lessonDoc = await Lesson.findById(lessonId);
     }
 
-    // fallback search using metadata if lesson is not found by ID
-    if (!lessonDoc && item.course_name) {
-      courseDoc = await Course.findOne({
-        name: String(item.course_name).trim(),
-      });
+    // Find or create course by name if provided
+    if (item.course_name) {
+      const normalizedCourseName = String(item.course_name).trim();
+      courseDoc = await Course.findOne({ name: normalizedCourseName });
 
-      if (courseDoc) {
-        const lessonQuery = {
-          course: courseDoc._id,
-          gradeLevel: normalizeGradeLevel(
-            item.grade_name || topLevelGrade || student.gradeLevel,
-          ),
-          strand: item.strand_name,
-          subStrand: item.sub_strand_name,
-        };
-        if (item.lesson_number) {
-          lessonQuery.lessonNumber = String(item.lesson_number);
-        }
-        lessonDoc = await Lesson.findOne(lessonQuery);
+      if (!courseDoc) {
+        courseDoc = await Course.create({
+          name: normalizedCourseName,
+          gradeLevels: [normalizeGradeLevel(item.grade_name || topLevelGrade || student.gradeLevel)]
+        });
       }
+    }
+
+    // Fallback search using metadata if lesson is not found by ID
+    if (!lessonDoc && courseDoc) {
+      const lessonQuery = {
+        course: courseDoc._id,
+        gradeLevel: normalizeGradeLevel(
+          item.grade_name || topLevelGrade || student.gradeLevel,
+        ),
+        strand: item.strand_name,
+        subStrand: item.sub_strand_name,
+      };
+      if (item.lesson_number) {
+        lessonQuery.lessonNumber = String(item.lesson_number);
+      }
+      lessonDoc = await Lesson.findOne(lessonQuery);
     }
 
     if (!lessonDoc) {
@@ -397,9 +405,9 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       continue;
     }
 
-    // If we found the lesson but didn't have the courseDoc, get it from the lesson
+    // If we found the lesson but didn't have the courseDoc (no course_name provided), get it from the lesson
     if (!courseDoc) {
-        courseDoc = await Course.findById(lessonDoc.course);
+      courseDoc = await Course.findById(lessonDoc.course);
     }
 
     const status =
@@ -429,6 +437,8 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       syncStatus: item.sync_status !== undefined ? Number(item.sync_status) : 1,
       lastUpdated,
       performedAt: lastUpdated,
+      practiceOriginalScore: item.practice_original_score !== undefined ? Number(item.practice_original_score) : null,
+      quizOriginalScore: item.quiz_original_score !== undefined ? Number(item.quiz_original_score) : null,
     };
 
     if (status === "completed") {
@@ -461,6 +471,32 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       received: activities.length,
       saved,
       errors,
+    },
+  });
+});
+
+export const getStudentActivities = catchAsync(async (req, res) => {
+  const student = await ensureStudent(req.user._id);
+  const { page, limit, skip } = parsePagination(req.query);
+
+  const [items, total] = await Promise.all([
+    Progress.find({ student: student._id })
+      .populate("course", "name")
+      .populate("lesson", "title strand subStrand lessonNumber")
+      .sort({ performedAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    Progress.countDocuments({ student: student._id }),
+  ]);
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Activities fetched successfully",
+    data: {
+      items,
+      meta: getPaginationMeta({ page, limit, total }),
     },
   });
 });

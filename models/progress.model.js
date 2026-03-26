@@ -91,6 +91,14 @@ const progressSchema = new Schema(
     lastUpdated: { type: Date },
     completedAt: { type: Date },
     performedAt: { type: Date, default: Date.now, index: true },
+    practiceOriginalScore: {
+      type: Number,
+      default: null,
+    },
+    quizOriginalScore: {
+      type: Number,
+      default: null,
+    },
   },
   { timestamps: true },
 );

@@ -1,4 +1,4 @@
-﻿import express from "express";
+import express from "express";
 import {
   createStudentSupportTicket,
   getStudentCourseContent,
@@ -8,6 +8,7 @@ import {
   getStudentProfile,
   getStudentProgress,
   getStudentSubjectProgress,
+  getStudentActivities,
   saveStudentActivity,
   syncStudentActivities,
   updateStudentProfile,
@@ -24,6 +25,7 @@ router.use(protect, restrictTo("student"));
 router.get("/home", getStudentHome);
 router.get("/courses/:courseId", getStudentCourseContent);
 router.post("/activities", saveStudentActivity);
+router.get("/activities", getStudentActivities); // According to the [syncStudentActivities]
 router.post("/activities/sync", syncStudentActivities);
 
 router.get("/progress", getStudentProgress);

@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import AppError from "../errors/AppError.js";
 import { Course } from "../models/course.model.js";
 import { Progress } from "../models/progress.model.js";
@@ -243,20 +244,20 @@ const buildWeeklyActivitySeries = async (match) => {
   };
 };
 
-const getMonthlyCompletionByCourse = async (courseIds) => {
+const getMonthlyCompletionByCourse = async (courseIds, filterCourseId = null) => {
   if (!courseIds.length) return [];
+  const targetCourseIds = filterCourseId ? [filterCourseId] : courseIds;
 
   const docs = await Progress.aggregate([
     {
       $match: {
         status: "completed",
-        course: { $in: courseIds },
+        course: { $in: targetCourseIds.map(id => new mongoose.Types.ObjectId(id)) },
       },
     },
     {
       $group: {
         _id: {
-          course: "$course",
           year: { $year: "$performedAt" },
           month: { $month: "$performedAt" },
         },
@@ -264,19 +265,8 @@ const getMonthlyCompletionByCourse = async (courseIds) => {
       },
     },
     {
-      $lookup: {
-        from: "courses",
-        localField: "_id.course",
-        foreignField: "_id",
-        as: "course",
-      },
-    },
-    { $unwind: "$course" },
-    {
       $project: {
         _id: 0,
-        courseId: "$course._id",
-        subject: "$course.name",
         year: "$_id.year",
         month: "$_id.month",
         completed: 1,
@@ -285,7 +275,18 @@ const getMonthlyCompletionByCourse = async (courseIds) => {
     { $sort: { year: 1, month: 1 } },
   ]);
 
-  return docs;
+  const monthMap = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const currentYear = new Date().getFullYear();
+  const fullYearData = monthMap.map((label, idx) => {
+    const monthIndex = idx + 1;
+    const found = docs.find(d => d.month === monthIndex && d.year === currentYear);
+    return {
+      month: label,
+      completed: found ? found.completed : 0,
+    };
+  });
+
+  return fullYearData;
 };
 
 const getSubjectRecentWork = async (studentId, courseId = null) => {
@@ -396,6 +397,7 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
   const teacher = await getTeacherDoc(req.user._id);
   if (!teacher) return next(new AppError(404, "Teacher profile not found"));
 
+  const { courseId } = req.query;
   const studentFilter = { school: teacher.school?._id };
   if (teacher.gradeLevel) {
     studentFilter.gradeLevel = teacher.gradeLevel;
@@ -407,25 +409,32 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
     course: { $in: courseIds },
   };
 
+  const now = new Date();
+  const startOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const startOfPrevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+
   const [
     totalStudents,
+    prevMonthStudents,
     totalSubjects,
     totalCompleted,
+    prevMonthCompleted,
     totalQuizCompleted,
+    prevMonthQuizCompleted,
     subjectOverview,
     studentsPerWeek,
     monthlyCompletionTrend,
+    milestone,
   ] = await Promise.all([
     Student.countDocuments(studentFilter),
+    Student.countDocuments({ ...studentFilter, createdAt: { $lt: startOfCurrentMonth, $gte: startOfPrevMonth } }),
     teacher.courses?.length || 0,
     Progress.countDocuments(progressMatch),
+    Progress.countDocuments({ ...progressMatch, performedAt: { $lt: startOfCurrentMonth, $gte: startOfPrevMonth } }),
     Progress.countDocuments({ ...progressMatch, activityType: "quiz" }),
+    Progress.countDocuments({ ...progressMatch, activityType: "quiz", performedAt: { $lt: startOfCurrentMonth, $gte: startOfPrevMonth } }),
     Progress.aggregate([
-      {
-        $match: {
-          ...progressMatch,
-        },
-      },
+      { $match: progressMatch },
       { $group: { _id: "$course", completed: { $sum: 1 } } },
       {
         $lookup: {
@@ -445,8 +454,23 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
       { $group: { _id: "$weekday", total: { $sum: 1 } } },
       { $sort: { _id: 1 } },
     ]),
-    getMonthlyCompletionByCourse(courseIds),
+    getMonthlyCompletionByCourse(courseIds, courseId),
+    Progress.findOne({ ...progressMatch, ...(courseId && { course: courseId }) })
+      .populate("lesson", "title strand subStrand lessonNumber")
+      .sort({ performedAt: -1 })
+      .lean(),
   ]);
+
+  const calculateGrowth = (current, previous) => {
+    if (previous === 0) return current > 0 ? 100 : 0;
+    return Number((((current - previous) / previous) * 100).toFixed(0));
+  };
+
+  // Note: For students and lessons, we usually want "growth in completions/signups this month" 
+  // vs "completions/signups last month".
+  const currentMonthStudents = await Student.countDocuments({ ...studentFilter, createdAt: { $gte: startOfCurrentMonth } });
+  const currentMonthCompleted = await Progress.countDocuments({ ...progressMatch, performedAt: { $gte: startOfCurrentMonth } });
+  const currentMonthQuizCompleted = await Progress.countDocuments({ ...progressMatch, activityType: "quiz", performedAt: { $gte: startOfCurrentMonth } });
 
   const weekMap = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const weeklyStudents = weekMap.map((day, idx) => ({
@@ -467,14 +491,30 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
       },
       counters: {
         totalStudents,
+        totalStudentsGrowth: calculateGrowth(currentMonthStudents, prevMonthStudents),
         totalSubjects,
+        totalSubjectsGrowth: 0, // Subjects growth is typically static unless new modules are added
         lessonCompleted: totalCompleted,
+        lessonCompletedGrowth: calculateGrowth(currentMonthCompleted, prevMonthCompleted),
         quizCompleted: totalQuizCompleted,
+        quizCompletedGrowth: calculateGrowth(currentMonthQuizCompleted, prevMonthQuizCompleted),
       },
       charts: {
         subjectOverview,
         weeklyStudents,
         monthlyCompletionTrend,
+        milestone: milestone ? {
+          date: milestone.performedAt,
+          strand: milestone.strandName || milestone.lesson?.strand,
+          subStrand: milestone.subStrandName || milestone.lesson?.subStrand,
+          lesson: milestone.lesson?.title,
+          progress: {
+            getReady: 100, // Based on image, completion implies 100%
+            learn: 100,
+            practice: milestone.activityType === 'practice' || milestone.activityType === 'quiz' ? 100 : 0,
+            quiz: milestone.activityType === 'quiz' ? 100 : 0
+          }
+        } : null
       },
     },
   });
