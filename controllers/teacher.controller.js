@@ -244,7 +244,7 @@ const buildWeeklyActivitySeries = async (match) => {
   };
 };
 
-const getMonthlyCompletionByCourse = async (courseIds, filterCourseId = null) => {
+const getMonthlyCompletionByCourse = async (studentIds, courseIds, filterCourseId = null) => {
   if (!courseIds.length) return [];
   const targetCourseIds = filterCourseId ? [filterCourseId] : courseIds;
 
@@ -252,12 +252,14 @@ const getMonthlyCompletionByCourse = async (courseIds, filterCourseId = null) =>
     {
       $match: {
         status: "completed",
+        student: { $in: studentIds },
         course: { $in: targetCourseIds.map(id => new mongoose.Types.ObjectId(id)) },
       },
     },
     {
       $group: {
         _id: {
+          course: "$course",
           year: { $year: "$performedAt" },
           month: { $month: "$performedAt" },
         },
@@ -265,25 +267,40 @@ const getMonthlyCompletionByCourse = async (courseIds, filterCourseId = null) =>
       },
     },
     {
+      $lookup: {
+        from: "courses",
+        localField: "_id.course",
+        foreignField: "_id",
+        as: "courseData",
+      },
+    },
+    { $unwind: "$courseData" },
+    {
       $project: {
         _id: 0,
+        subject: "$courseData.name",
         year: "$_id.year",
         month: "$_id.month",
         completed: 1,
       },
     },
-    { $sort: { year: 1, month: 1 } },
   ]);
 
   const monthMap = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const currentYear = new Date().getFullYear();
+  
+  const coursesDB = await Course.find({ _id: { $in: targetCourseIds } }).select("name").lean();
+
   const fullYearData = monthMap.map((label, idx) => {
     const monthIndex = idx + 1;
-    const found = docs.find(d => d.month === monthIndex && d.year === currentYear);
-    return {
-      month: label,
-      completed: found ? found.completed : 0,
-    };
+    const monthResult = { month: label };
+
+    coursesDB.forEach(course => {
+      const found = docs.find(d => d.subject === course.name && d.month === monthIndex && d.year === currentYear);
+      monthResult[course.name] = found ? found.completed : 0;
+    });
+
+    return monthResult;
   });
 
   return fullYearData;
@@ -422,6 +439,11 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
   const startOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
   const startOfPrevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
 
+  const baseProgressMatch = { student: { $in: studentIds } };
+  if (courseId) {
+    baseProgressMatch.course = new mongoose.Types.ObjectId(courseId);
+  }
+
   const [
     totalStudents,
     prevMonthStudents,
@@ -443,8 +465,16 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
     Progress.countDocuments({ ...progressMatch, activityType: "quiz" }),
     Progress.countDocuments({ ...progressMatch, activityType: "quiz", performedAt: { $lt: startOfCurrentMonth, $gte: startOfPrevMonth } }),
     Progress.aggregate([
-      { $match: progressMatch },
-      { $group: { _id: "$course", completed: { $sum: 1 } } },
+      { $match: baseProgressMatch },
+      { 
+        $group: { 
+          _id: "$course", 
+          total: { $sum: 1 },
+          completed: {
+            $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] }
+          }
+        } 
+      },
       {
         $lookup: {
           from: "courses",
@@ -454,16 +484,36 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
         },
       },
       { $unwind: "$course" },
-      { $project: { _id: 0, subject: "$course.name", completed: 1 } },
+      { 
+        $project: { 
+          _id: 0, 
+          courseId: "$_id",
+          subject: "$course.name", 
+          total: 1, 
+          completed: 1,
+          completionRate: {
+            $cond: [
+              { $eq: ["$total", 0] },
+              0,
+              {
+                $round: [
+                  { $multiply: [{ $divide: ["$completed", "$total"] }, 100] },
+                  2,
+                ],
+              },
+            ],
+          },
+        } 
+      },
       { $sort: { completed: -1 } },
     ]),
     Progress.aggregate([
-      { $match: { status: "completed", course: { $in: courseIds } } },
+      { $match: { status: "completed", student: { $in: studentIds }, course: { $in: courseIds } } },
       { $project: { weekday: { $dayOfWeek: "$performedAt" } } },
       { $group: { _id: "$weekday", total: { $sum: 1 } } },
       { $sort: { _id: 1 } },
     ]),
-    getMonthlyCompletionByCourse(courseIds, courseId),
+    getMonthlyCompletionByCourse(studentIds, courseIds, courseId),
     Progress.findOne({ ...progressMatch, ...(courseId && { course: courseId }) })
       .populate("lesson", "title strand subStrand lessonNumber")
       .sort({ performedAt: -1 })
