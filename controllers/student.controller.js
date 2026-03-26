@@ -271,8 +271,10 @@ export const getStudentCourseContent = catchAsync(async (req, res, next) => {
 
 export const saveStudentActivity = catchAsync(async (req, res, next) => {
   const student = await ensureStudent(req.user._id);
-  const { lessonId, activityType, subActivity, status, score, activityMinutes } =
-    req.body;
+  const { 
+    lessonId, activityType, subActivity, status, score, activityMinutes,
+    originalScore, totalQuestions, practiceOriginalScore, quizOriginalScore
+  } = req.body;
 
   if (!lessonId || !activityType) {
     return next(new AppError(400, "lessonId and activityType are required"));
@@ -280,6 +282,8 @@ export const saveStudentActivity = catchAsync(async (req, res, next) => {
 
   const lesson = await Lesson.findById(lessonId);
   if (!lesson) return next(new AppError(404, "Lesson not found"));
+
+  const parseScore = (val) => (val !== undefined && val !== null && val !== "") ? Number(val) : null;
 
   const update = {
     status: status || "in_progress",
@@ -290,9 +294,11 @@ export const saveStudentActivity = catchAsync(async (req, res, next) => {
     lastUpdated: new Date(),
   };
 
-  if (score !== undefined) {
-    update.score = Number(score);
-  }
+  if (score !== undefined) update.score = parseScore(score);
+  if (originalScore !== undefined) update.originalScore = parseScore(originalScore);
+  if (totalQuestions !== undefined) update.totalQuestions = parseScore(totalQuestions);
+  if (practiceOriginalScore !== undefined) update.practiceOriginalScore = parseScore(practiceOriginalScore);
+  if (quizOriginalScore !== undefined) update.quizOriginalScore = parseScore(quizOriginalScore);
 
   if (update.status === "completed") {
     update.completedAt = new Date();
@@ -374,7 +380,8 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
     // Find or create course by name if provided
     if (item.course_name) {
       const normalizedCourseName = String(item.course_name).trim();
-      courseDoc = await Course.findOne({ name: normalizedCourseName });
+      const regexCourseName = new RegExp(`^${normalizedCourseName}$`, "i");
+      courseDoc = await Course.findOne({ name: regexCourseName });
 
       if (!courseDoc) {
         courseDoc = await Course.create({
@@ -395,9 +402,32 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
         subStrand: item.sub_strand_name,
       };
       if (item.lesson_number) {
-        lessonQuery.lessonNumber = String(item.lesson_number);
+        // Extract digits from strings like "Lesson 1" to match the Number type in Lesson model
+        const parsed = parseInt(String(item.lesson_number).replace(/^\D+/g, ""), 10);
+        if (!isNaN(parsed)) {
+          lessonQuery.lessonNumber = parsed;
+        } else {
+          lessonQuery.lessonNumber = item.lesson_number; // Fallback
+        }
       }
       lessonDoc = await Lesson.findOne(lessonQuery);
+
+      // Create lesson if not found and we have courseDoc
+      if (!lessonDoc && courseDoc) {
+        const lessonTitle = (item.lesson_id && !mongoose.Types.ObjectId.isValid(item.lesson_id)) 
+          ? item.lesson_id 
+          : (item.lesson_title || "Untitled Lesson");
+
+        lessonDoc = await Lesson.create({
+          course: courseDoc._id,
+          gradeLevel: normalizeGradeLevel(item.grade_name || topLevelGrade || student.gradeLevel),
+          strand: item.strand_name || "Unknown Strand",
+          subStrand: item.sub_strand_name || "Unknown Sub-strand",
+          lessonNumber: lessonQuery.lessonNumber || 1,
+          title: lessonTitle,
+          status: "active"
+        });
+      }
     }
 
     if (!lessonDoc) {
@@ -416,6 +446,8 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
         : "in_progress";
     const lastUpdated = item.last_updated ? new Date(item.last_updated) : new Date();
 
+    const parseScore = (val) => (val !== undefined && val !== null && val !== "") ? Number(val) : null;
+
     const payload = {
       student: student._id,
       course: courseDoc?._id,
@@ -429,16 +461,14 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       activityType,
       subActivity: item.sub_activity || null,
       status,
-      score: item.score !== undefined ? Number(item.score) : null,
-      originalScore:
-        item.original_score !== undefined ? Number(item.original_score) : null,
-      totalQuestions:
-        item.total_questions !== undefined ? Number(item.total_questions) : null,
+      score: parseScore(item.score),
+      originalScore: parseScore(item.original_score),
+      totalQuestions: parseScore(item.total_questions),
       syncStatus: item.sync_status !== undefined ? Number(item.sync_status) : 1,
       lastUpdated,
       performedAt: lastUpdated,
-      practiceOriginalScore: item.practice_original_score !== undefined ? Number(item.practice_original_score) : null,
-      quizOriginalScore: item.quiz_original_score !== undefined ? Number(item.quiz_original_score) : null,
+      practiceOriginalScore: parseScore(item.practice_original_score),
+      quizOriginalScore: parseScore(item.quiz_original_score),
     };
 
     if (status === "completed") {

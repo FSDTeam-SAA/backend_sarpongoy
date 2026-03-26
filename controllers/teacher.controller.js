@@ -403,11 +403,20 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
     studentFilter.gradeLevel = teacher.gradeLevel;
   }
 
-  const courseIds = (teacher.courses || []).map((c) => c._id);
+  const students = await Student.find(studentFilter).select("_id").lean();
+  const studentIds = students.map((s) => s._id);
+
   const progressMatch = {
     status: "completed",
-    course: { $in: courseIds },
+    student: { $in: studentIds },
   };
+
+  const allCourses = await Course.find({ status: "active" }).select("_id").lean();
+  const courseIds = allCourses.map((c) => c._id);
+
+  if (courseId) {
+    progressMatch.course = courseId;
+  }
 
   const now = new Date();
   const startOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -428,7 +437,7 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
   ] = await Promise.all([
     Student.countDocuments(studentFilter),
     Student.countDocuments({ ...studentFilter, createdAt: { $lt: startOfCurrentMonth, $gte: startOfPrevMonth } }),
-    teacher.courses?.length || 0,
+    Course.countDocuments({ status: "active" }),
     Progress.countDocuments(progressMatch),
     Progress.countDocuments({ ...progressMatch, performedAt: { $lt: startOfCurrentMonth, $gte: startOfPrevMonth } }),
     Progress.countDocuments({ ...progressMatch, activityType: "quiz" }),
@@ -614,11 +623,9 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
 
   const { courseId } = req.query;
   if (courseId) {
-    const hasCourse = (teacher.courses || []).some(
-      (c) => String(c._id) === String(courseId),
-    );
+    const hasCourse = await Course.exists({ _id: courseId, status: "active" });
     if (!hasCourse) {
-      return next(new AppError(403, "Course not assigned to this teacher"));
+      return next(new AppError(404, "Course not found or inactive"));
     }
   }
 
@@ -722,11 +729,16 @@ export const getTeacherSubjects = catchAsync(async (req, res, next) => {
   const teacher = await getTeacherDoc(req.user._id);
   if (!teacher) return next(new AppError(404, "Teacher profile not found"));
 
+  const courses = await Course.find({ status: "active" })
+    .select("_id name description gradeLevels")
+    .sort({ name: 1 })
+    .lean();
+
   sendResponse(res, {
     statusCode: 200,
     success: true,
     message: "Subjects fetched successfully",
-    data: teacher.courses || [],
+    data: courses,
   });
 });
 
