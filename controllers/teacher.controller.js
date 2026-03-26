@@ -110,7 +110,14 @@ const getStudentProgressSummary = async (studentId, courseId = null) => {
 };
 
 const getCourseWiseOverview = async (studentId, courseId = null) => {
-  const match = { student: studentId };
+  const now = new Date();
+  const startDate = new Date(now);
+  startDate.setDate(now.getDate() - 6);
+
+  const match = { 
+    student: studentId,
+    performedAt: { $gte: startDate }
+  };
   if (courseId) match.course = courseId;
 
   return Progress.aggregate([
@@ -144,6 +151,7 @@ const getCourseWiseOverview = async (studentId, courseId = null) => {
         subject: "$course.name",
         activityCount: "$totalActivities",
         totalHours: { $round: [{ $divide: ["$totalMinutes", 60] }, 2] },
+        avgDailyHours: { $round: [{ $divide: ["$totalMinutes", 420] }, 2] },
         avgQuizScore: { $round: ["$avgQuizScore", 2] },
         completionRate: {
           $cond: [
@@ -732,6 +740,80 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
     getSubjectRecentWork(student._id, courseId),
   ]);
 
+  let subjectWise = [];
+  if (!courseId) {
+    const activeCourseIds = await Progress.distinct("course", { student: student._id });
+    const coursesDB = await Course.find({ _id: { $in: activeCourseIds } }).select("name").lean();
+    
+    subjectWise = await Promise.all(
+      activeCourseIds.map(async (cId) => {
+        const matchBaseCourse = { student: student._id, course: cId };
+        
+        const [
+          progSummary,
+          cWeeklyActivity,
+          cRecentWorkDoc,
+          cActivityBreakdown
+        ] = await Promise.all([
+          getStudentProgressSummary(student._id, cId),
+          buildWeeklyActivitySeries(matchBaseCourse),
+          Progress.find(matchBaseCourse)
+            .populate("course", "name")
+            .populate("lesson", "title strand subStrand lessonNumber")
+            .sort({ performedAt: -1 })
+            .limit(10)
+            .lean(),
+          Progress.aggregate([
+            { $match: matchBaseCourse },
+            {
+              $group: {
+                _id: "$activityType",
+                total: { $sum: 1 },
+                completed: {
+                  $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+                },
+              },
+            },
+            {
+              $project: {
+                _id: 0,
+                activityType: "$_id",
+                total: 1,
+                completed: 1,
+              },
+            },
+          ])
+        ]);
+
+        const courseDoc = coursesDB.find(c => c._id.toString() === cId.toString());
+
+        return {
+           courseId: cId,
+           subject: courseDoc?.name || "Unknown",
+           summary: progSummary.summary,
+           weeklyActivity: cWeeklyActivity,
+           activityBreakdown: cActivityBreakdown,
+           recentWork: cRecentWorkDoc.map(item => ({
+              _id: item._id,
+              subject: item.course?.name,
+              activityType: item.activityType,
+              status: item.status,
+              score: item.score,
+              performedAt: item.performedAt,
+              lesson: item.lesson
+                ? {
+                    title: item.lesson.title,
+                    strand: item.lesson.strand,
+                    subStrand: item.lesson.subStrand,
+                    lessonNumber: item.lesson.lessonNumber,
+                  }
+                : null,
+            }))
+        };
+      })
+    );
+  }
+
   sendResponse(res, {
     statusCode: 200,
     success: true,
@@ -747,30 +829,27 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
         status: student.status,
         picture: student.picture,
       },
-      overview: {
-        summary: progressSheet.summary,
-        subjectProgress: progressSheet.subjectProgress,
+      progressSheet: {
         courseWiseOverview,
-        weeklyActivity,
-        activityBreakdown,
-        subjectRecentWork,
-        recentWork: recentWork.map((item) => ({
-          _id: item._id,
-          subject: item.course?.name,
-          activityType: item.activityType,
-          status: item.status,
-          score: item.score,
-          performedAt: item.performedAt,
-          lesson: item.lesson
-            ? {
-                title: item.lesson.title,
-                strand: item.lesson.strand,
-                subStrand: item.lesson.subStrand,
-                lessonNumber: item.lesson.lessonNumber,
-              }
-            : null,
-        })),
+        marks: weeklyActivity,
       },
+      recentWork: recentWork.map((item) => ({
+        _id: item._id,
+        subject: item.course?.name,
+        activityType: item.activityType,
+        status: item.status,
+        score: item.score,
+        performedAt: item.performedAt,
+        lesson: item.lesson
+          ? {
+              title: item.lesson.title,
+              strand: item.lesson.strand,
+              subStrand: item.lesson.subStrand,
+              lessonNumber: item.lesson.lessonNumber,
+            }
+          : null,
+      })),
+      subjectWise,
     },
   });
 });
