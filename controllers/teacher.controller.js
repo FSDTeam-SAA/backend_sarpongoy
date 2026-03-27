@@ -332,6 +332,7 @@ const getSubjectRecentWork = async (studentId, courseId = null) => {
             practiceOriginalScore: "$practiceOriginalScore",
             quizOriginalScore: "$quizOriginalScore",
             total: "$totalQuestions",
+            performedAt: "$performedAt",
             percentage: {
               $cond: [
                 { $and: [{ $gt: ["$totalQuestions", 0] }, { $ne: ["$score", null] }] },
@@ -419,6 +420,8 @@ const getSubjectRecentWork = async (studentId, courseId = null) => {
             1,
           ],
         },
+        practiceDate: "$practice.performedAt",
+        quizDate: "$quiz.performedAt",
       },
     },
     { $sort: { subject: 1 } },
@@ -725,8 +728,8 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
   subjectRecentWork.forEach((item) => {
     const { subject, ...metrics } = item;
     recentWorkMap[subject] = metrics;
-    // For subjectWise, we use the quiz percentage as the overall subject indicator
-    subjectWiseMap[subject] = { percentage: metrics.quiz };
+    // For subjectWise, we use the quiz percentage and include the date for filtering
+    subjectWiseMap[subject] = { percentage: metrics.quiz, date: metrics.quizDate };
   });
 
   sendResponse(res, {
