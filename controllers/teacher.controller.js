@@ -329,7 +329,30 @@ const getSubjectRecentWork = async (studentId, courseId = null) => {
             type: "$activityType",
             score: "$score",
             originalScore: "$originalScore",
+            practiceOriginalScore: "$practiceOriginalScore",
+            quizOriginalScore: "$quizOriginalScore",
             total: "$totalQuestions",
+            percentage: {
+              $cond: [
+                { $and: [{ $gt: ["$totalQuestions", 0] }, { $ne: ["$score", null] }] },
+                { $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100] },
+                0,
+              ],
+            },
+            practiceOrigPercentage: {
+              $cond: [
+                { $and: [{ $gt: ["$totalQuestions", 0] }, { $ne: ["$practiceOriginalScore", null] }] },
+                { $multiply: [{ $divide: ["$practiceOriginalScore", "$totalQuestions"] }, 100] },
+                0,
+              ],
+            },
+            quizOrigPercentage: {
+              $cond: [
+                { $and: [{ $gt: ["$totalQuestions", 0] }, { $ne: ["$quizOriginalScore", null] }] },
+                { $multiply: [{ $divide: ["$quizOriginalScore", "$totalQuestions"] }, 100] },
+                0,
+              ],
+            },
           },
         },
       },
@@ -342,7 +365,7 @@ const getSubjectRecentWork = async (studentId, courseId = null) => {
               $filter: {
                 input: "$activities",
                 as: "a",
-                cond: { $eq: ["$$a.type", "practice"] },
+                cond: { $or: [{ $eq: ["$$a.type", "practice"] }, { $eq: ["$$a.type", "independent"] }] },
               },
             },
             0,
@@ -365,31 +388,7 @@ const getSubjectRecentWork = async (studentId, courseId = null) => {
             input: "$activities",
             as: "a",
             cond: {
-              $and: [{ $eq: ["$$a.type", "quiz"] }, { $ne: ["$$a.score", null] }],
-            },
-          },
-        },
-      },
-    },
-    {
-      $project: {
-        practice: 1,
-        quiz: 1,
-        lowestQuiz: {
-          $reduce: {
-            input: "$quizzes",
-            initialValue: null,
-            in: {
-              $cond: [
-                {
-                  $or: [
-                    { $eq: ["$$value", null] },
-                    { $lt: ["$$this.score", "$$value.score"] },
-                  ],
-                },
-                "$$this",
-                "$$value",
-              ],
+              $and: [{ $eq: ["$$a.type", "quiz"] }, { $ne: ["$$a.score", null] }, { $gt: ["$$a.total", 0] }],
             },
           },
         },
@@ -407,11 +406,19 @@ const getSubjectRecentWork = async (studentId, courseId = null) => {
     {
       $project: {
         _id: 0,
-        courseId: "$_id",
         subject: "$course.name",
-        practice: 1,
-        quiz: 1,
-        lowestQuiz: 1,
+        practice: { $round: [{ $ifNull: ["$practice.percentage", 0] }, 1] },
+        quiz: { $round: [{ $ifNull: ["$quiz.percentage", 0] }, 1] },
+        "practice original Score": { $round: [{ $ifNull: ["$practice.practiceOrigPercentage", 0] }, 1] },
+        "quiz original score": { $round: [{ $ifNull: ["$quiz.quizOrigPercentage", 0] }, 1] },
+        "lowest quiz score": {
+          $round: [
+            {
+              $ifNull: [{ $min: "$quizzes.percentage" }, 0],
+            },
+            1,
+          ],
+        },
       },
     },
     { $sort: { subject: 1 } },
@@ -704,115 +711,23 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
     progressSheet,
     courseWiseOverview,
     weeklyActivity,
-    recentWork,
-    activityBreakdown,
     subjectRecentWork,
   ] = await Promise.all([
     getStudentProgressSummary(student._id, courseId),
     getCourseWiseOverview(student._id, courseId),
     buildWeeklyActivitySeries(matchBase),
-    Progress.find(matchBase)
-      .populate("course", "name")
-      .populate("lesson", "title strand subStrand lessonNumber")
-      .sort({ performedAt: -1 })
-      .limit(10)
-      .lean(),
-    Progress.aggregate([
-      { $match: matchBase },
-      {
-        $group: {
-          _id: "$activityType",
-          total: { $sum: 1 },
-          completed: {
-            $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
-          },
-        },
-      },
-      {
-        $project: {
-          _id: 0,
-          activityType: "$_id",
-          total: 1,
-          completed: 1,
-        },
-      },
-    ]),
     getSubjectRecentWork(student._id, courseId),
   ]);
 
-  let subjectWise = [];
-  if (!courseId) {
-    const activeCourseIds = await Progress.distinct("course", { student: student._id });
-    const coursesDB = await Course.find({ _id: { $in: activeCourseIds } }).select("name").lean();
-    
-    subjectWise = await Promise.all(
-      activeCourseIds.map(async (cId) => {
-        const matchBaseCourse = { student: student._id, course: cId };
-        
-        const [
-          progSummary,
-          cWeeklyActivity,
-          cRecentWorkDoc,
-          cActivityBreakdown
-        ] = await Promise.all([
-          getStudentProgressSummary(student._id, cId),
-          buildWeeklyActivitySeries(matchBaseCourse),
-          Progress.find(matchBaseCourse)
-            .populate("course", "name")
-            .populate("lesson", "title strand subStrand lessonNumber")
-            .sort({ performedAt: -1 })
-            .limit(10)
-            .lean(),
-          Progress.aggregate([
-            { $match: matchBaseCourse },
-            {
-              $group: {
-                _id: "$activityType",
-                total: { $sum: 1 },
-                completed: {
-                  $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
-                },
-              },
-            },
-            {
-              $project: {
-                _id: 0,
-                activityType: "$_id",
-                total: 1,
-                completed: 1,
-              },
-            },
-          ])
-        ]);
+  const recentWorkMap = {};
+  const subjectWiseMap = {};
 
-        const courseDoc = coursesDB.find(c => c._id.toString() === cId.toString());
-
-        return {
-           courseId: cId,
-           subject: courseDoc?.name || "Unknown",
-           summary: progSummary.summary,
-           weeklyActivity: cWeeklyActivity,
-           activityBreakdown: cActivityBreakdown,
-           recentWork: cRecentWorkDoc.map(item => ({
-              _id: item._id,
-              subject: item.course?.name,
-              activityType: item.activityType,
-              status: item.status,
-              score: item.score,
-              performedAt: item.performedAt,
-              lesson: item.lesson
-                ? {
-                    title: item.lesson.title,
-                    strand: item.lesson.strand,
-                    subStrand: item.lesson.subStrand,
-                    lessonNumber: item.lesson.lessonNumber,
-                  }
-                : null,
-            }))
-        };
-      })
-    );
-  }
+  subjectRecentWork.forEach((item) => {
+    const { subject, ...metrics } = item;
+    recentWorkMap[subject] = metrics;
+    // For subjectWise, we use the quiz percentage as the overall subject indicator
+    subjectWiseMap[subject] = { percentage: metrics.quiz };
+  });
 
   sendResponse(res, {
     statusCode: 200,
@@ -833,23 +748,8 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
         courseWiseOverview,
         marks: weeklyActivity,
       },
-      recentWork: recentWork.map((item) => ({
-        _id: item._id,
-        subject: item.course?.name,
-        activityType: item.activityType,
-        status: item.status,
-        score: item.score,
-        performedAt: item.performedAt,
-        lesson: item.lesson
-          ? {
-              title: item.lesson.title,
-              strand: item.lesson.strand,
-              subStrand: item.lesson.subStrand,
-              lessonNumber: item.lesson.lessonNumber,
-            }
-          : null,
-      })),
-      subjectWise,
+      recentWork: recentWorkMap,
+      subjectWise: subjectWiseMap,
     },
   });
 });
