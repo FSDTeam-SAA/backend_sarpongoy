@@ -553,7 +553,7 @@ export const getStudentActivities = catchAsync(async (req, res) => {
       .populate("lesson", "title strand subStrand lessonNumber")
       .sort({ lastUpdated: -1, performedAt: -1 }) // Sort by lastUpdated for proper sync ordering
       .skip(skip)
-      .limit(limit)
+      //.limit(limit)
       .lean(),
     Progress.countDocuments(filter),
   ]);
