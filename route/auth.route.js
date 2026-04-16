@@ -1,4 +1,4 @@
-﻿import express from "express";
+import express from "express";
 import {
   forgotPassword,
   login,
@@ -11,6 +11,7 @@ import {
   saveStudentSecurityQuestions,
   verifyForgotPasswordOTP,
   verifyStudentSecurityAnswers,
+  deleteMyAccount,
 } from "../controllers/auth.controller.js";
 import { protect, restrictTo } from "../middleware/auth.middleware.js";
 
@@ -27,5 +28,6 @@ router.post("/student/security-questions", protect, restrictTo("student"), saveS
 router.post("/student/verify-security", verifyStudentSecurityAnswers);
 router.post("/student/reset-password", resetStudentPasswordBySecurity);
 router.get("/me", protect, me);
+router.delete("/delete-account", protect, deleteMyAccount);
 
 export default router;

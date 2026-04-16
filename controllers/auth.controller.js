@@ -1,7 +1,10 @@
-﻿import bcrypt from "bcryptjs";
+import bcrypt from "bcryptjs";
 import AppError from "../errors/AppError.js";
 import { User } from "../models/user.model.js";
 import { Student } from "../models/student.model.js";
+import { Teacher } from "../models/teacher.model.js";
+import { Progress } from "../models/progress.model.js";
+import { School } from "../models/school.model.js";
 import { createToken, verifyToken } from "../utils/authToken.js";
 import { generateOTP, sendOTP } from "../utils/commonMethod.js";
 import { DEFAULT_SECURITY_QUESTIONS } from "../utils/securityQuestions.js";
@@ -516,5 +519,55 @@ export const me = catchAsync(async (req, res) => {
     success: true,
     message: "Profile fetched successfully",
     data: sanitizeUser(req.user),
+  });
+});
+
+export const deleteMyAccount = catchAsync(async (req, res, next) => {
+  const { _id, role } = req.user;
+
+  if (role === "student") {
+    const student = await Student.findOne({ user: _id });
+    if (student) {
+      const schoolId = student.school;
+      await Promise.all([
+        Progress.deleteMany({ student: student._id }),
+        student.deleteOne(),
+      ]);
+      if (schoolId) {
+        const [totalStudent, totalTeacher] = await Promise.all([
+          Student.countDocuments({ school: schoolId }),
+          Teacher.countDocuments({ school: schoolId }),
+        ]);
+        await School.findByIdAndUpdate(schoolId, { totalStudent, totalTeacher });
+      }
+    }
+  } else if (role === "teacher") {
+    const teacher = await Teacher.findOne({ user: _id });
+    if (teacher) {
+      const schoolId = teacher.school;
+      await teacher.deleteOne();
+      if (schoolId) {
+        const [totalStudent, totalTeacher] = await Promise.all([
+          Student.countDocuments({ school: schoolId }),
+          Teacher.countDocuments({ school: schoolId }),
+        ]);
+        await School.findByIdAndUpdate(schoolId, { totalStudent, totalTeacher });
+      }
+    }
+  }
+
+  // Finally delete the user account
+  await User.findByIdAndDelete(_id);
+
+  res.clearCookie("refreshToken", {
+    secure: process.env.NODE_ENV === "production",
+    httpOnly: true,
+    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+  });
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Account deleted successfully",
   });
 });
