@@ -75,6 +75,7 @@ const getSummary = async (studentId) => {
   return {
     totalActivities: summary?.totalActivities || 0,
     completedActivities: summary?.completedActivities || 0,
+    totalMinutes: summary?.totalMinutes || 0,
     totalHours: Number(((summary?.totalMinutes || 0) / 60 || 0).toFixed(2)),
     avgQuizScore: Number((summary?.avgQuizScore || 0).toFixed(2)),
     completionRate:
@@ -475,6 +476,7 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       subActivity: item.sub_activity || null,
       status,
       score: parseScore(item.score),
+      activityMinutes: Number(item.activity_minutes || item.activityMinutes || 0),
       originalScore: parseScore(item.original_score),
       totalQuestions: parseScore(item.total_questions),
       syncStatus: item.sync_status !== undefined ? Number(item.sync_status) : 1,
@@ -695,6 +697,7 @@ export const getStudentSubjectProgress = catchAsync(async (req, res, next) => {
 
 export const getStudentProfile = catchAsync(async (req, res) => {
   const student = await ensureStudent(req.user._id);
+  const summary = await getSummary(student._id);
 
   sendResponse(res, {
     statusCode: 200,
@@ -710,6 +713,8 @@ export const getStudentProfile = catchAsync(async (req, res) => {
         school: student.school,
         picture: student.picture,
         file: student.file,
+        averageScore: summary.avgQuizScore,
+        totalNumberOfMinutes: summary.totalMinutes,
       },
     },
   });
