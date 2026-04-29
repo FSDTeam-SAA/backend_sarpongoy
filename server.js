@@ -10,6 +10,7 @@ import { Server } from "socket.io";
 import globalErrorHandler from "./middleware/globalErrorHandler.js";
 import notFound from "./middleware/notFound.js";
 import { handleMulterError } from "./middleware/multer.middleware.js";
+import "./workers/syncWorker.js";
 
 dotenv.config();
 

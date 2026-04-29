@@ -11,6 +11,7 @@ import sendResponse from "../utils/sendResponse.js";
 import { parsePagination, getPaginationMeta } from "../utils/pagination.js";
 import { uploadOnCloudinary } from "../utils/commonMethod.js";
 import mongoose from "mongoose";
+import { activitySyncQueue } from "../config/queue.js";
 
 const ensureStudent = async (userId) => {
   const student = await Student.findOne({ user: userId })
@@ -81,11 +82,11 @@ const getSummary = async (studentId) => {
     completionRate:
       summary?.totalActivities > 0
         ? Number(
-            (
-              (summary.completedActivities / summary.totalActivities) *
-              100
-            ).toFixed(2),
-          )
+          (
+            (summary.completedActivities / summary.totalActivities) *
+            100
+          ).toFixed(2),
+        )
         : 0,
   };
 };
@@ -272,7 +273,7 @@ export const getStudentCourseContent = catchAsync(async (req, res, next) => {
 
 export const saveStudentActivity = catchAsync(async (req, res, next) => {
   const student = await ensureStudent(req.user._id);
-  const { 
+  const {
     lessonId, activityType, subActivity, status, score, activityMinutes,
     originalScore, totalQuestions, practiceOriginalScore, quizOriginalScore
   } = req.body;
@@ -353,185 +354,27 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
     return next(new AppError(400, "activities array is required"));
   }
 
-  let saved = 0;
-  let skipped = 0; // Tracks items ignored due to older timestamps
-  const errors = [];
-
-  // --- Step 1: Pre-fetch Existing Data to Solve N+1 Problem ---
-  const validLessonIds = activities
-    .map((i) => i.lesson_id || i.lessonId || i.lesson)
-    .filter((id) => mongoose.Types.ObjectId.isValid(id));
-
-  const existingLessons = await Lesson.find({ _id: { $in: validLessonIds } }).lean();
-  const lessonMap = new Map(existingLessons.map((l) => [String(l._id), l]));
-
-  const courseNames = [...new Set(activities.map((i) => i.course_name).filter(Boolean))];
-  const existingCourses = await Course.find({ 
-    name: { $in: courseNames.map((n) => new RegExp(`^${n.trim()}$`, "i")) } 
-  }).lean();
-  const courseMap = new Map(existingCourses.map((c) => [c.name.toLowerCase().trim(), c]));
-
-  const existingProgress = await Progress.find({
-    student: student._id,
-    lesson: { $in: validLessonIds }
-  }).lean();
-  const progressMap = new Map(
-    existingProgress.map((p) => [`${p.lesson}_${p.activityType}_${p.subActivity || null}`, p])
+  // Add the sync task to the background queue
+  await activitySyncQueue.add(
+    "sync-job",
+    {
+      studentId: student._id,
+      activities,
+      topLevelGrade,
+    },
+    {
+      removeOnComplete: true,
+      attempts: 3,
+    },
   );
 
-  const bulkOps = [];
-
-  // --- Step 2: Iterate and Build Bulk Operations ---
-  for (let idx = 0; idx < activities.length; idx += 1) {
-    const item = activities[idx] || {};
-    const lessonId = item.lesson_id || item.lessonId || item.lesson;
-    const activityType = String(item.activity_type || item.activityType || "").trim().toLowerCase();
-
-    if (!lessonId || !activityType) {
-      errors.push({ index: idx, reason: "lesson_id and activity_type are required" });
-      continue;
-    }
-
-    let lessonDoc = mongoose.Types.ObjectId.isValid(lessonId) ? lessonMap.get(String(lessonId)) : null;
-    let courseDoc = item.course_name ? courseMap.get(String(item.course_name).toLowerCase().trim()) : null;
-
-    // Fallback: Create Course if perfectly missing
-    if (item.course_name && !courseDoc) {
-      const normalizedCourseName = String(item.course_name).trim();
-      courseDoc = await Course.create({
-        name: normalizedCourseName,
-        gradeLevels: [normalizeGradeLevel(item.grade_name || topLevelGrade || student.gradeLevel)]
-      });
-      courseMap.set(normalizedCourseName.toLowerCase(), courseDoc);
-    }
-
-    // Fallback: Create/Find Lesson if missing
-    if (!lessonDoc && courseDoc) {
-      const lessonQuery = {
-        course: courseDoc._id,
-        gradeLevel: normalizeGradeLevel(item.grade_name || topLevelGrade || student.gradeLevel),
-        strand: item.strand_name,
-        subStrand: item.sub_strand_name,
-      };
-      if (item.lesson_number) {
-        const parsed = parseInt(String(item.lesson_number).replace(/^\D+/g, ""), 10);
-        lessonQuery.lessonNumber = !isNaN(parsed) ? parsed : item.lesson_number;
-      }
-      
-      lessonDoc = await Lesson.findOne(lessonQuery);
-
-      if (!lessonDoc) {
-        const lessonTitle = (item.lesson_id && !mongoose.Types.ObjectId.isValid(item.lesson_id)) 
-          ? item.lesson_id 
-          : (item.lesson_title || "Untitled Lesson");
-
-        lessonDoc = await Lesson.create({
-          course: courseDoc._id,
-          gradeLevel: normalizeGradeLevel(item.grade_name || topLevelGrade || student.gradeLevel),
-          strand: item.strand_name || "Unknown Strand",
-          subStrand: item.sub_strand_name || "Unknown Sub-strand",
-          lessonNumber: lessonQuery.lessonNumber || 1,
-          title: lessonTitle,
-          status: "active"
-        });
-      }
-      lessonMap.set(String(lessonDoc._id), lessonDoc);
-    }
-
-    if (!lessonDoc) {
-      errors.push({ index: idx, lessonId, reason: "Lesson not found in database. Matching failed." });
-      continue;
-    }
-
-    if (!courseDoc) {
-      courseDoc = await Course.findById(lessonDoc.course).lean();
-    }
-
-    const status = (Number(item.is_completed) === 1 || item.is_completed === true) ? "completed" : "in_progress";
-    const incomingLastUpdated = item.last_updated ? new Date(item.last_updated) : new Date();
-
-    // --- Step 3: Conflict Resolution (Last Write Wins) ---
-    const progressKey = `${lessonDoc._id}_${activityType}_${item.sub_activity || null}`;
-    const existingRecord = progressMap.get(progressKey);
-
-    // If existing record is newer than incoming, skip this update
-    if (existingRecord && new Date(existingRecord.lastUpdated) > incomingLastUpdated) {
-      skipped += 1;
-      continue;
-    }
-
-    const parseScore = (val) => (val !== undefined && val !== null && val !== "") ? Number(val) : null;
-
-    const payload = {
-      student: student._id,
-      course: courseDoc?._id,
-      courseName: item.course_name || courseDoc?.name || undefined,
-      lesson: lessonDoc._id,
-      lessonId: lessonId,
-      strandName: item.strand_name || lessonDoc.strand,
-      subStrandName: item.sub_strand_name || lessonDoc.subStrand,
-      lessonNumber: item.lesson_number || String(lessonDoc.lessonNumber),
-      gradeName: item.grade_name || lessonDoc.gradeLevel,
-      activityType,
-      subActivity: item.sub_activity || null,
-      status,
-      score: parseScore(item.score),
-      activityMinutes: Number(item.activity_minutes || item.activityMinutes || 0),
-      originalScore: parseScore(item.original_score),
-      totalQuestions: parseScore(item.total_questions),
-      syncStatus: item.sync_status !== undefined ? Number(item.sync_status) : 1,
-      lastUpdated: incomingLastUpdated,
-      performedAt: incomingLastUpdated,
-      practiceOriginalScore: parseScore(item.practice_original_score),
-      quizOriginalScore: parseScore(item.quiz_original_score),
-    };
-
-    if (status === "completed") {
-      payload.completedAt = incomingLastUpdated;
-    }
-
-    bulkOps.push({
-      updateOne: {
-        filter: {
-          student: student._id,
-          lesson: lessonDoc._id,
-          activityType: payload.activityType,
-          subActivity: payload.subActivity,
-        },
-        update: { $set: payload },
-        upsert: true
-      }
-    });
-
-    // Update in-memory map to resolve conflicts within the same request payload
-    progressMap.set(progressKey, { lastUpdated: incomingLastUpdated });
-  }
-
-  // --- Step 4: Execute Bulk Write ---
-  if (bulkOps.length > 0) {
-    try {
-      await Progress.bulkWrite(bulkOps, { ordered: false });
-      saved = bulkOps.length;
-    } catch (error) {
-      console.error("BulkWrite error : ", error);
-      if (error.writeErrors) {
-        error.writeErrors.forEach(err => errors.push({ reason: err.errmsg }));
-        saved = bulkOps.length - error.writeErrors.length;
-      } else {
-        errors.push({ reason: error.message });
-      }
-    }
-  }
-
   sendResponse(res, {
-    statusCode: 200,
+    statusCode: 202,
     success: true,
-    message: "Activities synced successfully",
+    message: "Sync request accepted and is being processed in the background",
     data: {
       received: activities.length,
-      saved,
-      skipped,
-      errors,
+      status: "queued",
     },
   });
 });
