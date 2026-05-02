@@ -324,9 +324,10 @@ export const addNewStudent = catchAsync(async (req, res, next) => {
     return next(new AppError(400, "Passwords do not match"));
   }
 
-  const validateId = mongoose.Types.ObjectId.isValid(schoolId);
-
-  const school = await ensureSchool({ validateId, schoolName });
+  const school = await ensureSchool({
+    schoolId: mongoose.Types.ObjectId.isValid(schoolId) ? schoolId : undefined,
+    schoolName,
+  });
   if (!school) {
     return next(new AppError(404, "School not found"));
   }
