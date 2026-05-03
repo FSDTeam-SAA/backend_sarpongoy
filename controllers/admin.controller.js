@@ -29,6 +29,26 @@ const normalizeUserId = (userId) =>
     .trim()
     .toUpperCase();
 
+const splitNameParts = (value) => {
+  const parts = String(value || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (parts.length === 0) {
+    return { firstName: "", lastName: "" };
+  }
+
+  if (parts.length === 1) {
+    return { firstName: parts[0], lastName: parts[0] };
+  }
+
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(" "),
+  };
+};
+
 const syncSchoolCounts = async (schoolId) => {
   const [totalStudent, totalTeacher] = await Promise.all([
     Student.countDocuments({ school: schoolId }),
@@ -614,6 +634,7 @@ export const addNewTeacher = catchAsync(async (req, res, next) => {
   const finalUserId = normalizeUserId(teacherUserID || userId);
   const finalPassword = teacherPassword || password;
   const finalConfirmPassword = confirmTeacherPassword || confirmPassword;
+  const { firstName, lastName } = splitNameParts(finalName);
 
   if (
     !finalName ||
@@ -652,6 +673,8 @@ export const addNewTeacher = catchAsync(async (req, res, next) => {
 
   const user = await User.create({
     name: finalName,
+    firstName,
+    lastName,
     userId: finalUserId,
     password: finalPassword,
     role: "teacher",
@@ -679,6 +702,8 @@ export const addNewTeacher = catchAsync(async (req, res, next) => {
 
   const teacher = await Teacher.create({
     user: user._id,
+    firstName,
+    lastName,
     school: school._id,
     name: finalName,
     gradeLevel: ensureGrade(gradeLevel),
