@@ -59,6 +59,7 @@ const userSchema = new Schema(
     },
     refreshToken: { type: String, default: "", select: false },
     isEmailVerified: { type: Boolean, default: false },
+    lastLoginAt: { type: Date, default: null, index: true },
     deleteReason: { type: String, default: "" },
   },
   { timestamps: true },
