@@ -17,15 +17,14 @@ const app = express();
 
 app.set("trust proxy", true);
 
-const collectOrigins = (...values) =>
-  [
-    ...new Set(
-      values
-        .flatMap((value) => String(value || "").split(","))
-        .map((value) => value.trim())
-        .filter(Boolean),
-    ),
-  ];
+const collectOrigins = (...values) => [
+  ...new Set(
+    values
+      .flatMap((value) => String(value || "").split(","))
+      .map((value) => value.trim())
+      .filter(Boolean),
+  ),
+];
 
 const allowedOrigins = collectOrigins(
   process.env.CORS_ORIGIN,
