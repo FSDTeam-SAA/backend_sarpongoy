@@ -24,6 +24,179 @@ const getTeacherDoc = async (userId) =>
     .populate("courses", "name")
     .populate("school", "name schoolCode");
 
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const ACTIVE_LOGIN_WINDOW_DAYS = 30;
+
+const normalizeFilterValue = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase();
+
+const isAllFilter = (value) => {
+  const normalized = normalizeFilterValue(value);
+  return !normalized || normalized === "all";
+};
+
+const getDateRangeFromPeriod = (period) => {
+  const now = new Date();
+  const normalized = normalizeFilterValue(period);
+  const start = new Date(now);
+
+  switch (normalized) {
+    case "today":
+      start.setHours(0, 0, 0, 0);
+      return { start, end: now, key: "day" };
+    case "past week":
+      start.setDate(now.getDate() - 6);
+      start.setHours(0, 0, 0, 0);
+      return { start, end: now, key: "day" };
+    case "past 1 month":
+      start.setMonth(now.getMonth() - 1);
+      start.setHours(0, 0, 0, 0);
+      return { start, end: now, key: "day" };
+    case "past 3 months":
+      start.setMonth(now.getMonth() - 3);
+      start.setHours(0, 0, 0, 0);
+      return { start, end: now, key: "month" };
+    case "past 6 months":
+      start.setMonth(now.getMonth() - 6);
+      start.setHours(0, 0, 0, 0);
+      return { start, end: now, key: "month" };
+    case "past year":
+    default:
+      start.setFullYear(now.getFullYear() - 1);
+      start.setHours(0, 0, 0, 0);
+      return { start, end: now, key: "month" };
+  }
+};
+
+const normalizeSubjectName = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/\s+/g, " ");
+
+const matchesSubjectFilter = (courseName, subject) => {
+  if (isAllFilter(subject)) return true;
+
+  const normalizedSubject = normalizeSubjectName(subject);
+  const normalizedCourse = normalizeSubjectName(courseName);
+
+  const aliases = {
+    english: ["english"],
+    science: ["science"],
+    math: ["math", "mathematics"],
+    rme: ["rme", "religious and moral education"],
+    "religious and moral education": ["rme", "religious and moral education"],
+    "social studies": ["social studies", "social science"],
+    "social science": ["social studies", "social science"],
+  };
+
+  const subjectAliases = aliases[normalizedSubject] || [normalizedSubject];
+
+  return subjectAliases.some(
+    (alias) =>
+      normalizedCourse === alias ||
+      normalizedCourse.includes(alias) ||
+      alias.includes(normalizedCourse),
+  );
+};
+
+const resolveTeacherCourseIds = (teacherCourses = [], subject = "ALL") => {
+  if (isAllFilter(subject)) {
+    return teacherCourses.map((course) => course._id);
+  }
+
+  return teacherCourses
+    .filter((course) => matchesSubjectFilter(course.name, subject))
+    .map((course) => course._id);
+};
+
+const getGradeLevelFilter = (gradeLevel, fallback = "ALL") => {
+  const normalized = normalizeGradeLevel(gradeLevel || fallback);
+  return isAllFilter(normalized) ? null : normalized;
+};
+
+const getStudentLoginStatus = (lastLoginAt) => {
+  if (!lastLoginAt) return "inactive";
+
+  const lastLoginTime = new Date(lastLoginAt).getTime();
+  if (Number.isNaN(lastLoginTime)) return "inactive";
+
+  return Date.now() - lastLoginTime <= ACTIVE_LOGIN_WINDOW_DAYS * DAY_IN_MS
+    ? "active"
+    : "inactive";
+};
+
+const buildDateRangeMatch = (range) =>
+  range ? { performedAt: { $gte: range.start, $lte: range.end } } : {};
+
+const buildSeriesBuckets = (range) => {
+  if (!range) return [];
+
+  const buckets = [];
+  const cursor = new Date(range.start);
+  cursor.setHours(0, 0, 0, 0);
+
+  if (range.key === "day") {
+    while (cursor <= range.end) {
+      const key = cursor.toISOString().slice(0, 10);
+      buckets.push({
+        key,
+        label: cursor.toLocaleDateString("en-US", { weekday: "short" }),
+      });
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    return buckets;
+  }
+
+  cursor.setDate(1);
+  while (cursor <= range.end) {
+    const key = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`;
+    buckets.push({
+      key,
+      label: cursor.toLocaleDateString("en-US", { month: "short" }),
+    });
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+
+  return buckets;
+};
+
+const mapBucketKey = (date, keyType) => {
+  const current = new Date(date);
+  if (keyType === "day") {
+    return current.toISOString().slice(0, 10);
+  }
+  return `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, "0")}`;
+};
+
+const buildPeriodSeries = (raw, range) => {
+  const buckets = buildSeriesBuckets(range);
+  if (!buckets.length) return [];
+
+  return buckets.map((bucket) => {
+    const found = raw.find((item) => item.bucket === bucket.key);
+    return {
+      label: bucket.label,
+      key: bucket.key,
+      total: found?.total || 0,
+      avgQuizScore: found?.avgQuizScore || 0,
+    };
+  });
+};
+
+const buildStudentStatusCounts = (students = []) =>
+  students.reduce(
+    (acc, student) => {
+      const status = getStudentLoginStatus(student.user?.lastLoginAt);
+      acc[status] += 1;
+      return acc;
+    },
+    { active: 0, inactive: 0 },
+  );
+
 const getStudentProgressSummary = async (studentId, courseId = null) => {
   const match = { student: studentId };
   if (courseId) match.course = courseId;
@@ -87,22 +260,10 @@ const getStudentProgressSummary = async (studentId, courseId = null) => {
 
   return {
     summary: {
-      totalActivities: summary?.totalActivities || 0,
-      completedActivities: summary?.completedActivities || 0,
-      totalHours: Number(((summary?.totalMinutes || 0) / 60 || 0).toFixed(2)),
-      avgQuizScore: Number((summary?.avgQuizScore || 0).toFixed(2)),
       avgDailyHours: Number(
         (((summary?.totalMinutes || 0) / 60 / 7) || 0).toFixed(2),
       ),
-      completionRate:
-        summary?.totalActivities > 0
-          ? Number(
-              (
-                (summary.completedActivities / summary.totalActivities) *
-                100
-              ).toFixed(2),
-            )
-          : 0,
+      avgQuizScore: Number((summary?.avgQuizScore || 0).toFixed(2)),
     },
     subjectProgress: bySubject,
   };
@@ -141,8 +302,9 @@ const getCourseWiseOverview = async (studentId, courseId = null) => {
         _id: 0,
         courseId: "$course._id",
         subject: "$course.name",
-        activityCount: "$totalActivities",
-        totalHours: { $round: [{ $divide: ["$totalMinutes", 60] }, 2] },
+        avgDailyHours: {
+          $round: [{ $divide: [{ $divide: ["$totalMinutes", 60] }, 7] }, 2],
+        },
         avgQuizScore: { $round: ["$avgQuizScore", 2] },
         completionRate: {
           $cond: [
@@ -186,7 +348,6 @@ const buildWeeklyActivitySeries = async (match) => {
           weekday: { $dayOfWeek: "$performedAt" },
         },
         totalMinutes: { $sum: "$activityMinutes" },
-        activityCount: { $sum: 1 },
         avgQuizScore: {
           $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
         },
@@ -197,8 +358,7 @@ const buildWeeklyActivitySeries = async (match) => {
         _id: 0,
         date: "$_id.day",
         weekday: "$_id.weekday",
-        activityCount: 1,
-        totalHours: { $round: [{ $divide: ["$totalMinutes", 60] }, 2] },
+        avgDailyHours: { $round: [{ $divide: ["$totalMinutes", 60] }, 2] },
         avgQuizScore: { $round: ["$avgQuizScore", 2] },
       },
     },
@@ -217,28 +377,25 @@ const buildWeeklyActivitySeries = async (match) => {
     days.push({
       label: dayLabels[dateObj.getDay()],
       date: iso,
-      activityCount: found?.activityCount || 0,
-      totalHours: found?.totalHours || 0,
+      avgDailyHours: found?.avgDailyHours || 0,
       avgQuizScore: found?.avgQuizScore || 0,
     });
   }
 
   const totals = days.reduce(
     (acc, cur) => ({
-      activityCount: acc.activityCount + cur.activityCount,
-      totalHours: Number((acc.totalHours + cur.totalHours).toFixed(2)),
-      avgQuizScore:
-        acc.avgQuizScore + (Number(cur.avgQuizScore) || 0) / days.length,
+      avgDailyHoursSum: Number((acc.avgDailyHoursSum + cur.avgDailyHours).toFixed(2)),
+      avgQuizScoreSum:
+        acc.avgQuizScoreSum + (Number(cur.avgQuizScore) || 0) / days.length,
     }),
-    { activityCount: 0, totalHours: 0, avgQuizScore: 0 },
+    { avgDailyHoursSum: 0, avgQuizScoreSum: 0 },
   );
 
   return {
     days,
     totals: {
-      ...totals,
-      avgQuizScore: Number(totals.avgQuizScore.toFixed(2)),
-      avgDailyHours: Number((totals.totalHours / days.length).toFixed(2)),
+      avgQuizScore: Number(totals.avgQuizScoreSum.toFixed(2)),
+      avgDailyHours: Number((totals.avgDailyHoursSum / days.length).toFixed(2)),
     },
   };
 };
@@ -288,67 +445,327 @@ const getMonthlyCompletionByCourse = async (courseIds) => {
   return docs;
 };
 
+const getCompletionTrend = async ({ studentIds = [], courseIds = [], range }) => {
+  if (!studentIds.length) return [];
+
+  const match = {
+    student: { $in: studentIds },
+    status: "completed",
+  };
+
+  if (courseIds.length) {
+    match.course = { $in: courseIds };
+  }
+
+  if (range) {
+    match.performedAt = { $gte: range.start, $lte: range.end };
+  }
+
+  const bucketFormat = range?.key === "day" ? "%Y-%m-%d" : "%Y-%m";
+
+  const raw = await Progress.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: {
+          bucket: { $dateToString: { format: bucketFormat, date: "$performedAt" } },
+        },
+        total: { $sum: 1 },
+        totalMinutes: { $sum: "$activityMinutes" },
+        avgQuizScore: {
+          $avg: {
+            $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null],
+          },
+        },
+      },
+    },
+    {
+      $project: {
+        _id: 0,
+        bucket: "$_id.bucket",
+        total: 1,
+        totalMinutes: 1,
+        avgQuizScore: { $round: ["$avgQuizScore", 2] },
+      },
+    },
+    { $sort: { bucket: 1 } },
+  ]);
+
+  return buildPeriodSeries(raw, range).map((item) => ({
+    ...item,
+    avgQuizScore: Number(item.avgQuizScore || 0),
+  }));
+};
+
+const getSubjectPerformanceSeries = async ({
+  studentIds = [],
+  courseIds = [],
+  range,
+}) => {
+  if (!studentIds.length) return [];
+
+  const match = {
+    student: { $in: studentIds },
+  };
+
+  if (courseIds.length) {
+    match.course = { $in: courseIds };
+  }
+
+  if (range) {
+    match.performedAt = { $gte: range.start, $lte: range.end };
+  }
+
+  const rangeDays = range
+    ? Math.max(Math.ceil((range.end.getTime() - range.start.getTime()) / DAY_IN_MS), 1)
+    : 7;
+
+  const raw = await Progress.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: "$course",
+        totalMinutes: { $sum: "$activityMinutes" },
+        avgQuizScore: {
+          $avg: {
+            $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null],
+          },
+        },
+        totalActivities: { $sum: 1 },
+      },
+    },
+    {
+      $lookup: {
+        from: "courses",
+        localField: "_id",
+        foreignField: "_id",
+        as: "course",
+      },
+    },
+    { $unwind: "$course" },
+    {
+      $project: {
+        _id: 0,
+        subject: "$course.name",
+        totalMinutes: 1,
+        totalActivities: 1,
+        avgQuizScore: { $round: ["$avgQuizScore", 2] },
+      },
+    },
+    { $sort: { subject: 1 } },
+  ]);
+
+  return raw.map((item) => ({
+    subject: item.subject,
+    avgDailyHours: Number(((item.totalMinutes || 0) / 60 / rangeDays).toFixed(2)),
+    avgQuizScore: Number(item.avgQuizScore || 0),
+  }));
+};
+
+const getWeeklyActivityTrend = async ({ studentIds = [], courseIds = [] }) => {
+  if (!studentIds.length) return [];
+
+  const now = new Date();
+  const startDate = new Date(now);
+  startDate.setDate(now.getDate() - 6);
+  startDate.setHours(0, 0, 0, 0);
+
+  const match = {
+    student: { $in: studentIds },
+    status: "completed",
+    performedAt: { $gte: startDate, $lte: now },
+  };
+
+  if (courseIds.length) {
+    match.course = { $in: courseIds };
+  }
+
+  const raw = await Progress.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: { day: { $dateToString: { format: "%Y-%m-%d", date: "$performedAt" } } },
+        total: { $sum: 1 },
+      },
+    },
+    {
+      $project: {
+        _id: 0,
+        day: "$_id.day",
+        total: 1,
+      },
+    },
+    { $sort: { day: 1 } },
+  ]);
+
+  const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const days = [];
+  for (let i = 6; i >= 0; i -= 1) {
+    const dateObj = new Date(now);
+    dateObj.setDate(now.getDate() - i);
+    const iso = dateObj.toISOString().slice(0, 10);
+    const found = raw.find((item) => item.day === iso);
+    days.push({
+      label: dayLabels[dateObj.getDay()],
+      date: iso,
+      total: found?.total || 0,
+    });
+  }
+
+  return days;
+};
+
+const getTeacherRecentWork = async ({
+  studentId,
+  courseIds = [],
+  range,
+  limit = 10,
+}) => {
+  if (!studentId) return [];
+
+  const match = {
+    student: studentId,
+  };
+
+  if (courseIds.length) {
+    match.course = { $in: courseIds };
+  }
+
+  if (range) {
+    match.performedAt = { $gte: range.start, $lte: range.end };
+  }
+
+  const raw = await Progress.aggregate([
+    { $match: match },
+    { $sort: { performedAt: -1 } },
+    {
+      $group: {
+        _id: {
+          lesson: "$lesson",
+          course: "$course",
+        },
+        performedAt: { $first: "$performedAt" },
+        courseName: { $first: "$courseName" },
+        practiceScore: {
+          $max: {
+            $cond: [{ $eq: ["$activityType", "practice"] }, "$score", null],
+          },
+        },
+        quizScore: {
+          $max: {
+            $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null],
+          },
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: "lessons",
+        localField: "_id.lesson",
+        foreignField: "_id",
+        as: "lesson",
+      },
+    },
+    {
+      $unwind: {
+        path: "$lesson",
+        preserveNullAndEmptyArrays: true,
+      },
+    },
+    {
+      $lookup: {
+        from: "courses",
+        localField: "_id.course",
+        foreignField: "_id",
+        as: "course",
+      },
+    },
+    {
+      $unwind: {
+        path: "$course",
+        preserveNullAndEmptyArrays: true,
+      },
+    },
+    {
+      $project: {
+        _id: 0,
+        subject: { $ifNull: ["$course.name", "$courseName"] },
+        date: "$performedAt",
+        practiceScore: 1,
+        quizScore: 1,
+        lesson: {
+          strand: "$lesson.strand",
+          subStrand: "$lesson.subStrand",
+          lessonNumber: "$lesson.lessonNumber",
+          title: "$lesson.title",
+        },
+      },
+    },
+    { $sort: { date: -1 } },
+    { $limit: limit },
+  ]);
+
+  return raw.map((item) => ({
+    subject: item.subject,
+    date: item.date,
+    practiceScore:
+      item.practiceScore === null || item.practiceScore === undefined
+        ? null
+        : Number(item.practiceScore),
+    quizScore:
+      item.quizScore === null || item.quizScore === undefined
+        ? null
+        : Number(item.quizScore),
+    lesson: item.lesson,
+  }));
+};
+
 export const getTeacherDashboard = catchAsync(async (req, res, next) => {
   const teacher = await getTeacherDoc(req.user._id);
   if (!teacher) return next(new AppError(404, "Teacher profile not found"));
 
+  const gradeLevel = req.query.gradeLevel || "ALL";
+  const timePeriod = req.query.timePeriod || "Past Year";
+  const subject = req.query.subject || "ALL";
+
   const studentFilter = { school: teacher.school?._id };
-  if (teacher.gradeLevel) {
-    studentFilter.gradeLevel = teacher.gradeLevel;
+  const normalizedGradeLevel = getGradeLevelFilter(gradeLevel);
+  if (normalizedGradeLevel) {
+    studentFilter.gradeLevel = normalizedGradeLevel;
   }
 
-  const courseIds = (teacher.courses || []).map((c) => c._id);
+  const [students, courseIds] = await Promise.all([
+    Student.find(studentFilter).populate("user", "userId lastLoginAt").lean(),
+    Promise.resolve(resolveTeacherCourseIds(teacher.courses || [], subject)),
+  ]);
+
+  const studentIds = students.map((student) => student._id);
+  const loginCounts = buildStudentStatusCounts(students);
+  const dateRange = getDateRangeFromPeriod(timePeriod);
   const progressMatch = {
+    student: { $in: studentIds },
+    ...(courseIds.length || isAllFilter(subject)
+      ? courseIds.length
+        ? { course: { $in: courseIds } }
+        : {}
+      : { course: { $in: [] } }),
+    ...buildDateRangeMatch(dateRange),
     status: "completed",
-    course: { $in: courseIds },
   };
 
   const [
-    totalStudents,
-    totalSubjects,
     totalCompleted,
     totalQuizCompleted,
     subjectOverview,
-    studentsPerWeek,
-    monthlyCompletionTrend,
+    subjectMetrics,
+    weeklyStudents,
   ] = await Promise.all([
-    Student.countDocuments(studentFilter),
-    teacher.courses?.length || 0,
     Progress.countDocuments(progressMatch),
     Progress.countDocuments({ ...progressMatch, activityType: "quiz" }),
-    Progress.aggregate([
-      {
-        $match: {
-          ...progressMatch,
-        },
-      },
-      { $group: { _id: "$course", completed: { $sum: 1 } } },
-      {
-        $lookup: {
-          from: "courses",
-          localField: "_id",
-          foreignField: "_id",
-          as: "course",
-        },
-      },
-      { $unwind: "$course" },
-      { $project: { _id: 0, subject: "$course.name", completed: 1 } },
-      { $sort: { completed: -1 } },
-    ]),
-    Progress.aggregate([
-      { $match: { status: "completed", course: { $in: courseIds } } },
-      { $project: { weekday: { $dayOfWeek: "$performedAt" } } },
-      { $group: { _id: "$weekday", total: { $sum: 1 } } },
-      { $sort: { _id: 1 } },
-    ]),
-    getMonthlyCompletionByCourse(courseIds),
+    getCompletionTrend({ studentIds, courseIds, range: dateRange }),
+    getSubjectPerformanceSeries({ studentIds, courseIds, range: dateRange }),
+    getWeeklyActivityTrend({ studentIds, courseIds }),
   ]);
-
-  const weekMap = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const weeklyStudents = weekMap.map((day, idx) => ({
-    day,
-    total: studentsPerWeek.find((item) => item._id === idx + 1)?.total || 0,
-  }));
 
   sendResponse(res, {
     statusCode: 200,
@@ -361,16 +778,33 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
         school: teacher.school,
         gradeLevel: teacher.gradeLevel,
       },
+      filters: {
+        gradeLevel,
+        timePeriod,
+        subject,
+        gradeLevels: ["JHS1", "JHS2", "JHS3", "ALL"],
+        timePeriods: [
+          "Today",
+          "Past Week",
+          "Past 1 Month",
+          "Past 3 Months",
+          "Past 6 Months",
+          "Past Year",
+        ],
+        subjects: ["English", "Science", "Social Science", "RME", "Math", "ALL"],
+      },
       counters: {
-        totalStudents,
-        totalSubjects,
+        totalStudents: students.length,
+        activeStudents: loginCounts.active,
+        inactiveStudents: loginCounts.inactive,
+        totalSubjects: teacher.courses?.length || 0,
         lessonCompleted: totalCompleted,
         quizCompleted: totalQuizCompleted,
       },
       charts: {
         subjectOverview,
+        subjectMetrics,
         weeklyStudents,
-        monthlyCompletionTrend,
       },
     },
   });
@@ -382,12 +816,11 @@ export const getTeacherStudents = catchAsync(async (req, res, next) => {
 
   const { page, limit, skip } = parsePagination(req.query);
   const filter = { school: teacher.school?._id };
+  const gradeLevel = req.query.gradeLevel || "ALL";
 
   if (req.query.status) filter.status = req.query.status;
-  if (req.query.gradeLevel)
-    filter.gradeLevel = normalizeGradeLevel(req.query.gradeLevel);
-  if (!req.query.gradeLevel && teacher.gradeLevel)
-    filter.gradeLevel = teacher.gradeLevel;
+  const normalizedGradeLevel = getGradeLevelFilter(gradeLevel);
+  if (normalizedGradeLevel) filter.gradeLevel = normalizedGradeLevel;
 
   if (req.query.search) {
     const regex = buildSearchRegex(req.query.search);
@@ -403,7 +836,7 @@ export const getTeacherStudents = catchAsync(async (req, res, next) => {
   const [items, total] = await Promise.all([
     Student.find(filter)
       .populate("school", "name schoolCode")
-      .populate("user", "userId")
+      .populate("user", "userId lastLoginAt")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -422,7 +855,8 @@ export const getTeacherStudents = catchAsync(async (req, res, next) => {
         userId: item.user?.userId,
         schoolName: item.school?.name,
         gradeLevel: item.gradeLevel,
-        status: item.status,
+        status: getStudentLoginStatus(item.user?.lastLoginAt),
+        lastLoginAt: item.user?.lastLoginAt || null,
       })),
       meta: getPaginationMeta({ page, limit, total }),
     },
@@ -438,7 +872,7 @@ export const getTeacherStudentById = catchAsync(async (req, res, next) => {
     school: teacher.school?._id,
   })
     .populate("school", "name schoolCode")
-    .populate("user", "name userId")
+    .populate("user", "name userId lastLoginAt")
     .lean();
 
   if (!student) return next(new AppError(404, "Student not found"));
@@ -457,7 +891,8 @@ export const getTeacherStudentById = catchAsync(async (req, res, next) => {
         schoolName: student.school?.name,
         schoolCode: student.school?.schoolCode,
         gradeLevel: student.gradeLevel,
-        status: student.status,
+        status: getStudentLoginStatus(student.user?.lastLoginAt),
+        lastLoginAt: student.user?.lastLoginAt || null,
       },
       progressSheet,
     },
@@ -468,7 +903,12 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
   const teacher = await getTeacherDoc(req.user._id);
   if (!teacher) return next(new AppError(404, "Teacher profile not found"));
 
+  const subject = req.query.subject || "ALL";
+  const timePeriod = req.query.timePeriod || "Today";
   const { courseId } = req.query;
+  const allowedCourseIds = resolveTeacherCourseIds(teacher.courses || [], subject);
+
+  let selectedCourseIds = allowedCourseIds;
   if (courseId) {
     const hasCourse = (teacher.courses || []).some(
       (c) => String(c._id) === String(courseId),
@@ -476,6 +916,7 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
     if (!hasCourse) {
       return next(new AppError(403, "Course not assigned to this teacher"));
     }
+    selectedCourseIds = [courseId];
   }
 
   const student = await Student.findOne({
@@ -483,13 +924,18 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
     school: teacher.school?._id,
   })
     .populate("school", "name schoolCode")
-    .populate("user", "name userId status")
+    .populate("user", "name userId status lastLoginAt")
     .lean();
 
   if (!student) return next(new AppError(404, "Student not found"));
 
-  const matchBase = { student: student._id };
-  if (courseId) matchBase.course = courseId;
+  const recentRange = getDateRangeFromPeriod(timePeriod);
+  const matchBase = {
+    student: student._id,
+    ...(selectedCourseIds.length
+      ? { course: { $in: selectedCourseIds } }
+      : { course: { $in: [] } }),
+  };
 
   const [
     progressSheet,
@@ -502,12 +948,12 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
       getStudentProgressSummary(student._id, courseId),
       getCourseWiseOverview(student._id, courseId),
       buildWeeklyActivitySeries(matchBase),
-      Progress.find(matchBase)
-        .populate("course", "name")
-        .populate("lesson", "title strand subStrand lessonNumber")
-        .sort({ performedAt: -1 })
-        .limit(10)
-        .lean(),
+      getTeacherRecentWork({
+        studentId: student._id,
+        courseIds: selectedCourseIds,
+        range: recentRange,
+        limit: 10,
+      }),
       Progress.aggregate([
         { $match: matchBase },
         {
@@ -542,7 +988,8 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
         schoolName: student.school?.name,
         schoolCode: student.school?.schoolCode,
         gradeLevel: student.gradeLevel,
-        status: student.status,
+        status: getStudentLoginStatus(student.user?.lastLoginAt),
+        lastLoginAt: student.user?.lastLoginAt || null,
         picture: student.picture,
       },
       overview: {
@@ -551,22 +998,7 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
         courseWiseOverview,
         weeklyActivity,
         activityBreakdown,
-        recentWork: recentWork.map((item) => ({
-          _id: item._id,
-          subject: item.course?.name,
-          activityType: item.activityType,
-          status: item.status,
-          score: item.score,
-          performedAt: item.performedAt,
-          lesson: item.lesson
-            ? {
-                title: item.lesson.title,
-                strand: item.lesson.strand,
-                subStrand: item.lesson.subStrand,
-                lessonNumber: item.lesson.lessonNumber,
-              }
-            : null,
-        })),
+        recentWork,
       },
     },
   });
