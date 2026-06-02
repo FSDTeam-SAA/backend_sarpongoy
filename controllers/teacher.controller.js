@@ -87,8 +87,7 @@ const matchesSubjectFilter = (courseName, subject) => {
     english: ["english"],
     science: ["science"],
     math: ["math", "mathematics"],
-    rme: ["rme", "religious and moral education"],
-    "religious and moral education": ["rme", "religious and moral education"],
+    "religious and moral education": ["religious and moral education"],
     "social studies": ["social studies", "social science"],
     "social science": ["social studies", "social science"],
   };
@@ -791,7 +790,14 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
           "Past 6 Months",
           "Past Year",
         ],
-        subjects: ["English", "Science", "Social Science", "RME", "Math", "ALL"],
+        subjects: [
+          "English",
+          "Science",
+          "Social Science",
+          "Religious and Moral Education",
+          "Math",
+          "ALL",
+        ],
       },
       counters: {
         totalStudents: students.length,
