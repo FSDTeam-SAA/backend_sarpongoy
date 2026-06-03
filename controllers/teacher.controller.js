@@ -260,7 +260,7 @@ const getStudentProgressSummary = async (studentId, courseId = null) => {
   return {
     summary: {
       avgDailyHours: Number(
-        (((summary?.totalMinutes || 0) / 60 / 7) || 0).toFixed(2),
+        ((summary?.totalMinutes || 0) / 60 / 7 || 0).toFixed(2),
       ),
       avgQuizScore: Number((summary?.avgQuizScore || 0).toFixed(2)),
     },
@@ -383,7 +383,9 @@ const buildWeeklyActivitySeries = async (match) => {
 
   const totals = days.reduce(
     (acc, cur) => ({
-      avgDailyHoursSum: Number((acc.avgDailyHoursSum + cur.avgDailyHours).toFixed(2)),
+      avgDailyHoursSum: Number(
+        (acc.avgDailyHoursSum + cur.avgDailyHours).toFixed(2),
+      ),
       avgQuizScoreSum:
         acc.avgQuizScoreSum + (Number(cur.avgQuizScore) || 0) / days.length,
     }),
@@ -444,7 +446,11 @@ const getMonthlyCompletionByCourse = async (courseIds) => {
   return docs;
 };
 
-const getCompletionTrend = async ({ studentIds = [], courseIds = [], range }) => {
+const getCompletionTrend = async ({
+  studentIds = [],
+  courseIds = [],
+  range,
+}) => {
   if (!studentIds.length) return [];
 
   const match = {
@@ -467,7 +473,9 @@ const getCompletionTrend = async ({ studentIds = [], courseIds = [], range }) =>
     {
       $group: {
         _id: {
-          bucket: { $dateToString: { format: bucketFormat, date: "$performedAt" } },
+          bucket: {
+            $dateToString: { format: bucketFormat, date: "$performedAt" },
+          },
         },
         total: { $sum: 1 },
         totalMinutes: { $sum: "$activityMinutes" },
@@ -516,7 +524,10 @@ const getSubjectPerformanceSeries = async ({
   }
 
   const rangeDays = range
-    ? Math.max(Math.ceil((range.end.getTime() - range.start.getTime()) / DAY_IN_MS), 1)
+    ? Math.max(
+        Math.ceil((range.end.getTime() - range.start.getTime()) / DAY_IN_MS),
+        1,
+      )
     : 7;
 
   const raw = await Progress.aggregate([
@@ -556,7 +567,9 @@ const getSubjectPerformanceSeries = async ({
 
   return raw.map((item) => ({
     subject: item.subject,
-    avgDailyHours: Number(((item.totalMinutes || 0) / 60 / rangeDays).toFixed(2)),
+    avgDailyHours: Number(
+      ((item.totalMinutes || 0) / 60 / rangeDays).toFixed(2),
+    ),
     avgQuizScore: Number(item.avgQuizScore || 0),
   }));
 };
@@ -583,7 +596,9 @@ const getWeeklyActivityTrend = async ({ studentIds = [], courseIds = [] }) => {
     { $match: match },
     {
       $group: {
-        _id: { day: { $dateToString: { format: "%Y-%m-%d", date: "$performedAt" } } },
+        _id: {
+          day: { $dateToString: { format: "%Y-%m-%d", date: "$performedAt" } },
+        },
         total: { $sum: 1 },
       },
     },
@@ -912,7 +927,10 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
   const subject = req.query.subject || "ALL";
   const timePeriod = req.query.timePeriod || "Today";
   const { courseId } = req.query;
-  const allowedCourseIds = resolveTeacherCourseIds(teacher.courses || [], subject);
+  const allowedCourseIds = resolveTeacherCourseIds(
+    teacher.courses || [],
+    subject,
+  );
 
   let selectedCourseIds = allowedCourseIds;
   if (courseId) {
@@ -949,38 +967,37 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
     weeklyActivity,
     recentWork,
     activityBreakdown,
-  ] =
-    await Promise.all([
-      getStudentProgressSummary(student._id, courseId),
-      getCourseWiseOverview(student._id, courseId),
-      buildWeeklyActivitySeries(matchBase),
-      getTeacherRecentWork({
-        studentId: student._id,
-        courseIds: selectedCourseIds,
-        range: recentRange,
-        limit: 10,
-      }),
-      Progress.aggregate([
-        { $match: matchBase },
-        {
-          $group: {
-            _id: "$activityType",
-            total: { $sum: 1 },
-            completed: {
-              $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
-            },
+  ] = await Promise.all([
+    getStudentProgressSummary(student._id, courseId),
+    getCourseWiseOverview(student._id, courseId),
+    buildWeeklyActivitySeries(matchBase),
+    getTeacherRecentWork({
+      studentId: student._id,
+      courseIds: selectedCourseIds,
+      range: recentRange,
+      limit: 10,
+    }),
+    Progress.aggregate([
+      { $match: matchBase },
+      {
+        $group: {
+          _id: "$activityType",
+          total: { $sum: 1 },
+          completed: {
+            $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
           },
         },
-        {
-          $project: {
-            _id: 0,
-            activityType: "$_id",
-            total: 1,
-            completed: 1,
-          },
+      },
+      {
+        $project: {
+          _id: 0,
+          activityType: "$_id",
+          total: 1,
+          completed: 1,
         },
-      ]),
-    ]);
+      },
+    ]),
+  ]);
 
   sendResponse(res, {
     statusCode: 200,
