@@ -9,6 +9,7 @@ import { DEFAULT_SECURITY_QUESTIONS } from "../utils/securityQuestions.js";
 dotenv.config();
 
 const DEFAULT_COUNT = 60;
+const DEFAULT_START = 1;
 const DEFAULT_GRADE_LEVEL = "JHS 1";
 const DEFAULT_STATUS = "active";
 const DEFAULT_SCHOOL_CODE = "ACH-JHS-005";
@@ -22,6 +23,7 @@ const getArgValue = (flag, fallback) => {
 };
 
 const count = Number(getArgValue("--count", DEFAULT_COUNT));
+const start = Number(getArgValue("--start", DEFAULT_START));
 const gradeLevel = getArgValue("--grade", DEFAULT_GRADE_LEVEL);
 const schoolId = getArgValue("--school-id", "");
 const schoolCode = getArgValue("--school-code", DEFAULT_SCHOOL_CODE);
@@ -79,6 +81,9 @@ try {
   if (!Number.isInteger(count) || count <= 0) {
     throw new Error("count must be a positive integer");
   }
+  if (!Number.isInteger(start) || start <= 0) {
+    throw new Error("start must be a positive integer");
+  }
 
   await mongoose.connect(process.env.MONGODB_URI);
 
@@ -87,7 +92,7 @@ try {
     throw new Error("No school found for bulk student creation");
   }
 
-  for (let index = 1; index <= count; index += 1) {
+  for (let index = start; index < start + count; index += 1) {
     const userId = normalizeUserId(index);
     const password = normalizePassword(index);
     const studentName = `Test User ${String(index).padStart(2, "0")}`;
@@ -185,6 +190,10 @@ try {
           _id: String(school._id),
           name: school.name,
           schoolCode: school.schoolCode,
+        },
+        range: {
+          start,
+          end: start + count - 1,
         },
         gradeLevel,
         outputPath,
