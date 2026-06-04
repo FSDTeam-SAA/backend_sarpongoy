@@ -117,6 +117,35 @@ const getGradeLevelFilter = (gradeLevel, fallback = "ALL") => {
   return isAllFilter(normalized) ? null : normalized;
 };
 
+const getOverviewGradeLevel = (gradeLevel) => {
+  const normalized = normalizeGradeLevel(gradeLevel);
+  return isAllFilter(normalized) ? null : normalized;
+};
+
+const buildStudentProgressMatch = ({
+  studentId,
+  courseIds = [],
+  gradeLevel = null,
+  range = null,
+}) => {
+  const match = { student: studentId };
+
+  if (courseIds.length) {
+    match.course = { $in: courseIds };
+  }
+
+  const normalizedGradeLevel = getOverviewGradeLevel(gradeLevel);
+  if (normalizedGradeLevel) {
+    match.gradeName = normalizedGradeLevel;
+  }
+
+  if (range) {
+    match.performedAt = { $gte: range.start, $lte: range.end };
+  }
+
+  return match;
+};
+
 const getStudentLoginStatus = (lastLoginAt) => {
   if (!lastLoginAt) return "inactive";
 
@@ -196,9 +225,18 @@ const buildStudentStatusCounts = (students = []) =>
     { active: 0, inactive: 0 },
   );
 
-const getStudentProgressSummary = async (studentId, courseId = null) => {
-  const match = { student: studentId };
-  if (courseId) match.course = courseId;
+const getStudentProgressSummary = async ({
+  studentId,
+  courseIds = [],
+  gradeLevel = null,
+  range = null,
+}) => {
+  const match = buildStudentProgressMatch({
+    studentId,
+    courseIds,
+    gradeLevel,
+    range,
+  });
 
   const [summary] = await Progress.aggregate([
     { $match: match },
@@ -259,6 +297,8 @@ const getStudentProgressSummary = async (studentId, courseId = null) => {
 
   return {
     summary: {
+      activityCount: summary?.totalActivities || 0,
+      totalHours: Number(((summary?.totalMinutes || 0) / 60 || 0).toFixed(2)),
       avgDailyHours: Number(
         ((summary?.totalMinutes || 0) / 60 / 7 || 0).toFixed(2),
       ),
@@ -268,9 +308,18 @@ const getStudentProgressSummary = async (studentId, courseId = null) => {
   };
 };
 
-const getCourseWiseOverview = async (studentId, courseId = null) => {
-  const match = { student: studentId };
-  if (courseId) match.course = courseId;
+const getCourseWiseOverview = async ({
+  studentId,
+  courseIds = [],
+  gradeLevel = null,
+  range = null,
+}) => {
+  const match = buildStudentProgressMatch({
+    studentId,
+    courseIds,
+    gradeLevel,
+    range,
+  });
 
   return Progress.aggregate([
     { $match: match },
@@ -632,22 +681,18 @@ const getWeeklyActivityTrend = async ({ studentIds = [], courseIds = [] }) => {
 const getTeacherRecentWork = async ({
   studentId,
   courseIds = [],
+  gradeLevel = null,
   range,
   limit = 10,
 }) => {
   if (!studentId) return [];
 
-  const match = {
-    student: studentId,
-  };
-
-  if (courseIds.length) {
-    match.course = { $in: courseIds };
-  }
-
-  if (range) {
-    match.performedAt = { $gte: range.start, $lte: range.end };
-  }
+  const match = buildStudentProgressMatch({
+    studentId,
+    courseIds,
+    gradeLevel,
+    range,
+  });
 
   const raw = await Progress.aggregate([
     { $match: match },
@@ -657,33 +702,37 @@ const getTeacherRecentWork = async ({
         _id: {
           lesson: "$lesson",
           course: "$course",
+          activityType: "$activityType",
         },
         performedAt: { $first: "$performedAt" },
         courseName: { $first: "$courseName" },
-        practiceScore: {
-          $max: {
-            $cond: [{ $eq: ["$activityType", "practice"] }, "$score", null],
-          },
-        },
-        quizScore: {
-          $max: {
-            $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null],
+        score: { $first: "$score" },
+        lessonData: {
+          $first: {
+            strand: "$strandName",
+            subStrand: "$subStrandName",
+            lessonNumber: "$lessonNumber",
+            title: null,
           },
         },
       },
     },
+    { $sort: { performedAt: -1 } },
     {
-      $lookup: {
-        from: "lessons",
-        localField: "_id.lesson",
-        foreignField: "_id",
-        as: "lesson",
-      },
-    },
-    {
-      $unwind: {
-        path: "$lesson",
-        preserveNullAndEmptyArrays: true,
+      $group: {
+        _id: {
+          lesson: "$_id.lesson",
+          course: "$_id.course",
+        },
+        date: { $first: "$performedAt" },
+        courseName: { $first: "$courseName" },
+        lessonData: { $first: "$lessonData" },
+        activityScores: {
+          $push: {
+            k: "$_id.activityType",
+            v: "$score",
+          },
+        },
       },
     },
     {
@@ -701,17 +750,45 @@ const getTeacherRecentWork = async ({
       },
     },
     {
+      $lookup: {
+        from: "lessons",
+        localField: "_id.lesson",
+        foreignField: "_id",
+        as: "lessonDoc",
+      },
+    },
+    {
+      $unwind: {
+        path: "$lessonDoc",
+        preserveNullAndEmptyArrays: true,
+      },
+    },
+    {
       $project: {
         _id: 0,
         subject: { $ifNull: ["$course.name", "$courseName"] },
-        date: "$performedAt",
-        practiceScore: 1,
-        quizScore: 1,
+        date: 1,
         lesson: {
-          strand: "$lesson.strand",
-          subStrand: "$lesson.subStrand",
-          lessonNumber: "$lesson.lessonNumber",
-          title: "$lesson.title",
+          strand: { $ifNull: ["$lessonDoc.strand", "$lessonData.strand"] },
+          subStrand: { $ifNull: ["$lessonDoc.subStrand", "$lessonData.subStrand"] },
+          lessonNumber: {
+            $ifNull: ["$lessonDoc.lessonNumber", "$lessonData.lessonNumber"],
+          },
+          title: { $ifNull: ["$lessonDoc.title", "$lessonData.title"] },
+        },
+        scores: { $arrayToObject: "$activityScores" },
+      },
+    },
+    {
+      $project: {
+        subject: 1,
+        date: 1,
+        lesson: 1,
+        practiceScore: {
+          $ifNull: [{ $getField: { field: "practice", input: "$scores" } }, null],
+        },
+        quizScore: {
+          $ifNull: [{ $getField: { field: "quiz", input: "$scores" } }, null],
         },
       },
     },
@@ -752,17 +829,17 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
     Student.find(studentFilter).populate("user", "userId lastLoginAt").lean(),
     Promise.resolve(resolveTeacherCourseIds(teacher.courses || [], subject)),
   ]);
+  const selectedCourseIds =
+    isAllFilter(subject) || courseIds.length
+      ? courseIds
+      : ["__no_match__"];
 
   const studentIds = students.map((student) => student._id);
   const loginCounts = buildStudentStatusCounts(students);
   const dateRange = getDateRangeFromPeriod(timePeriod);
   const progressMatch = {
     student: { $in: studentIds },
-    ...(courseIds.length || isAllFilter(subject)
-      ? courseIds.length
-        ? { course: { $in: courseIds } }
-        : {}
-      : { course: { $in: [] } }),
+    ...(selectedCourseIds.length ? { course: { $in: selectedCourseIds } } : {}),
     ...buildDateRangeMatch(dateRange),
     status: "completed",
   };
@@ -776,9 +853,9 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
   ] = await Promise.all([
     Progress.countDocuments(progressMatch),
     Progress.countDocuments({ ...progressMatch, activityType: "quiz" }),
-    getCompletionTrend({ studentIds, courseIds, range: dateRange }),
-    getSubjectPerformanceSeries({ studentIds, courseIds, range: dateRange }),
-    getWeeklyActivityTrend({ studentIds, courseIds }),
+    getCompletionTrend({ studentIds, courseIds: selectedCourseIds, range: dateRange }),
+    getSubjectPerformanceSeries({ studentIds, courseIds: selectedCourseIds, range: dateRange }),
+    getWeeklyActivityTrend({ studentIds, courseIds: selectedCourseIds }),
   ]);
 
   sendResponse(res, {
@@ -898,7 +975,10 @@ export const getTeacherStudentById = catchAsync(async (req, res, next) => {
 
   if (!student) return next(new AppError(404, "Student not found"));
 
-  const progressSheet = await getStudentProgressSummary(student._id);
+  const progressSheet = await getStudentProgressSummary({
+    studentId: student._id,
+    gradeLevel: student.gradeLevel,
+  });
 
   sendResponse(res, {
     statusCode: 200,
@@ -924,6 +1004,7 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
   const teacher = await getTeacherDoc(req.user._id);
   if (!teacher) return next(new AppError(404, "Teacher profile not found"));
 
+  const gradeLevel = req.query.gradeLevel || "ALL";
   const subject = req.query.subject || "ALL";
   const timePeriod = req.query.timePeriod || "Today";
   const { courseId } = req.query;
@@ -954,12 +1035,13 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
   if (!student) return next(new AppError(404, "Student not found"));
 
   const recentRange = getDateRangeFromPeriod(timePeriod);
-  const matchBase = {
-    student: student._id,
-    ...(selectedCourseIds.length
-      ? { course: { $in: selectedCourseIds } }
-      : { course: { $in: [] } }),
-  };
+  const effectiveGradeLevel = getOverviewGradeLevel(gradeLevel) || student.gradeLevel;
+  const matchBase = buildStudentProgressMatch({
+    studentId: student._id,
+    courseIds: selectedCourseIds,
+    gradeLevel: effectiveGradeLevel,
+    range: recentRange,
+  });
 
   const [
     progressSheet,
@@ -968,12 +1050,23 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
     recentWork,
     activityBreakdown,
   ] = await Promise.all([
-    getStudentProgressSummary(student._id, courseId),
-    getCourseWiseOverview(student._id, courseId),
+    getStudentProgressSummary({
+      studentId: student._id,
+      courseIds: selectedCourseIds,
+      gradeLevel: effectiveGradeLevel,
+      range: recentRange,
+    }),
+    getCourseWiseOverview({
+      studentId: student._id,
+      courseIds: selectedCourseIds,
+      gradeLevel: effectiveGradeLevel,
+      range: recentRange,
+    }),
     buildWeeklyActivitySeries(matchBase),
     getTeacherRecentWork({
       studentId: student._id,
       courseIds: selectedCourseIds,
+      gradeLevel: effectiveGradeLevel,
       range: recentRange,
       limit: 10,
     }),
@@ -1014,6 +1107,28 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
         status: getStudentLoginStatus(student.user?.lastLoginAt),
         lastLoginAt: student.user?.lastLoginAt || null,
         picture: student.picture,
+      },
+      filters: {
+        gradeLevel,
+        timePeriod,
+        subject,
+        gradeLevels: ["JHS1", "JHS2", "JHS3", "ALL"],
+        timePeriods: [
+          "Today",
+          "Past Week",
+          "Past 1 Month",
+          "Past 3 Months",
+          "Past 6 Months",
+          "Past Year",
+        ],
+        subjects: [
+          "English",
+          "Science",
+          "Social Science",
+          "Religious and Moral Education",
+          "Math",
+          "ALL",
+        ],
       },
       overview: {
         summary: progressSheet.summary,
