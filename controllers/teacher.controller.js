@@ -975,7 +975,10 @@ export const getTeacherStudentById = catchAsync(async (req, res, next) => {
 
   if (!student) return next(new AppError(404, "Student not found"));
 
-  const progressSheet = await getStudentProgressSummary(student._id);
+  const progressSheet = await getStudentProgressSummary({
+    studentId: student._id,
+    gradeLevel: student.gradeLevel,
+  });
 
   sendResponse(res, {
     statusCode: 200,
