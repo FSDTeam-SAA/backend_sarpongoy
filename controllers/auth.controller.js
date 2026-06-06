@@ -145,6 +145,7 @@ const sanitizeUser = (user) => ({
   status: user.status,
   school: user.school,
   gradeLevel: user.gradeLevel,
+  lastLoginAt: user.lastLoginAt || null,
 });
 
 const createAuthTokens = (user) => {
@@ -220,6 +221,7 @@ export const login = catchAsync(async (req, res, next) => {
 
   const { accessToken, refreshToken } = createAuthTokens(user);
   user.refreshToken = refreshToken;
+  user.lastLoginAt = new Date();
   await user.save();
 
   res.cookie("refreshToken", refreshToken, {

@@ -29,6 +29,26 @@ const normalizeUserId = (userId) =>
     .trim()
     .toUpperCase();
 
+const splitNameParts = (value) => {
+  const parts = String(value || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (parts.length === 0) {
+    return { firstName: "", lastName: "" };
+  }
+
+  if (parts.length === 1) {
+    return { firstName: parts[0], lastName: parts[0] };
+  }
+
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(" "),
+  };
+};
+
 const syncSchoolCounts = async (schoolId) => {
   const [totalStudent, totalTeacher] = await Promise.all([
     Student.countDocuments({ school: schoolId }),
@@ -324,9 +344,10 @@ export const addNewStudent = catchAsync(async (req, res, next) => {
     return next(new AppError(400, "Passwords do not match"));
   }
 
-  const validateId = mongoose.Types.ObjectId.isValid(schoolId);
-
-  const school = await ensureSchool({ validateId, schoolName });
+  const school = await ensureSchool({
+    schoolId: mongoose.Types.ObjectId.isValid(schoolId) ? schoolId : undefined,
+    schoolName,
+  });
   if (!school) {
     return next(new AppError(404, "School not found"));
   }
@@ -478,6 +499,7 @@ export const getStudentById = catchAsync(async (req, res, next) => {
         schoolCode: student.school?.schoolCode,
         gradeLevel: student.gradeLevel,
         status: student.status,
+        picture: student.picture || { url: "", public_id: "" },
       },
       progressSheet,
     },
@@ -612,6 +634,7 @@ export const addNewTeacher = catchAsync(async (req, res, next) => {
   const finalUserId = normalizeUserId(teacherUserID || userId);
   const finalPassword = teacherPassword || password;
   const finalConfirmPassword = confirmTeacherPassword || confirmPassword;
+  const { firstName, lastName } = splitNameParts(finalName);
 
   if (
     !finalName ||
@@ -650,6 +673,8 @@ export const addNewTeacher = catchAsync(async (req, res, next) => {
 
   const user = await User.create({
     name: finalName,
+    firstName,
+    lastName,
     userId: finalUserId,
     password: finalPassword,
     role: "teacher",
@@ -677,6 +702,8 @@ export const addNewTeacher = catchAsync(async (req, res, next) => {
 
   const teacher = await Teacher.create({
     user: user._id,
+    firstName,
+    lastName,
     school: school._id,
     name: finalName,
     gradeLevel: ensureGrade(gradeLevel),
@@ -782,6 +809,7 @@ export const getTeacherById = catchAsync(async (req, res, next) => {
       schoolCode: teacher.school?.schoolCode,
       gradeLevel: teacher.gradeLevel,
       status: teacher.status,
+      picture: teacher.picture || { url: "", public_id: "" },
       courses: teacher.courses || [],
     },
   });
