@@ -812,49 +812,32 @@ const getTeacherRecentWork = async ({
 
   const raw = await Progress.aggregate([
     { $match: match },
-    { $sort: { performedAt: -1 } },
     {
-      $group: {
-        _id: {
-          lesson: "$lesson",
-          course: "$course",
-          activityType: "$activityType",
-        },
-        performedAt: { $first: "$performedAt" },
-        courseName: { $first: "$courseName" },
-        score: { $first: "$score" },
-        lessonData: {
-          $first: {
-            strand: "$strandName",
-            subStrand: "$subStrandName",
-            lessonNumber: "$lessonNumber",
-            title: null,
-          },
-        },
+      $sort: {
+        performedAt: -1,
+        updatedAt: -1,
+        createdAt: -1,
+        _id: -1,
       },
     },
-    { $sort: { performedAt: -1 } },
     {
       $group: {
-        _id: {
-          lesson: "$_id.lesson",
-          course: "$_id.course",
-        },
-        date: { $first: "$performedAt" },
+        _id: "$course",
+        lessonId: { $first: "$lesson" },
         courseName: { $first: "$courseName" },
-        lessonData: { $first: "$lessonData" },
-        activityScores: {
-          $push: {
-            k: "$_id.activityType",
-            v: "$score",
-          },
-        },
+        performedAt: { $first: "$performedAt" },
+        activityType: { $first: "$activityType" },
+        score: { $first: "$score" },
+        originalScore: { $first: "$originalScore" },
+        strandName: { $first: "$strandName" },
+        subStrandName: { $first: "$subStrandName" },
+        lessonNumber: { $first: "$lessonNumber" },
       },
     },
     {
       $lookup: {
         from: "courses",
-        localField: "_id.course",
+        localField: "_id",
         foreignField: "_id",
         as: "course",
       },
@@ -868,7 +851,7 @@ const getTeacherRecentWork = async ({
     {
       $lookup: {
         from: "lessons",
-        localField: "_id.lesson",
+        localField: "lessonId",
         foreignField: "_id",
         as: "lessonDoc",
       },
@@ -884,32 +867,34 @@ const getTeacherRecentWork = async ({
         _id: 0,
         subject: { $ifNull: ["$course.name", "$courseName"] },
         date: "$performedAt",
+        activityType: 1,
+        score: 1,
+        originalScore: 1,
         lesson: {
-          strand: { $ifNull: ["$lessonDoc.strand", "$lessonData.strand"] },
+          strand: { $ifNull: ["$lessonDoc.strand", "$strandName"] },
           subStrand: {
-            $ifNull: ["$lessonDoc.subStrand", "$lessonData.subStrand"],
+            $ifNull: ["$lessonDoc.subStrand", "$subStrandName"],
           },
           lessonNumber: {
-            $ifNull: ["$lessonDoc.lessonNumber", "$lessonData.lessonNumber"],
+            $ifNull: ["$lessonDoc.lessonNumber", "$lessonNumber"],
           },
-          title: { $ifNull: ["$lessonDoc.title", "$lessonData.title"] },
+          title: { $ifNull: ["$lessonDoc.title", null] },
         },
-        scores: { $arrayToObject: "$activityScores" },
       },
     },
     {
       $project: {
         subject: 1,
         date: 1,
+        activityType: 1,
+        score: 1,
+        originalScore: 1,
         lesson: 1,
         practiceScore: {
-          $ifNull: [
-            { $getField: { field: "practice", input: "$scores" } },
-            null,
-          ],
+          $cond: [{ $eq: ["$activityType", "practice"] }, "$score", null],
         },
         quizScore: {
-          $ifNull: [{ $getField: { field: "quiz", input: "$scores" } }, null],
+          $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null],
         },
       },
     },
@@ -920,6 +905,9 @@ const getTeacherRecentWork = async ({
   return raw.map((item) => ({
     subject: item.subject,
     date: item.date,
+    activityType: item.activityType,
+    score:
+      item.score === null || item.score === undefined ? null : Number(item.score),
     practiceScore:
       item.practiceScore === null || item.practiceScore === undefined
         ? null
@@ -1268,7 +1256,7 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
         courseWiseOverview,
         monthlyActivity,
         activityBreakdown,
-        recentWork: recentWork[0] || null,
+        recentWork,
       },
     },
   });
