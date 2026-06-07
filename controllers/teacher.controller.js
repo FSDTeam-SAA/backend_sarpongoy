@@ -1188,7 +1188,6 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
       courseIds: selectedCourseIds,
       gradeLevel: effectiveGradeLevel,
       range: null,
-      limit: 1,
     }),
     Progress.aggregate([
       { $match: matchBase },
