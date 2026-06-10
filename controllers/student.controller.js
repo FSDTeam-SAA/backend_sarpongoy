@@ -346,6 +346,7 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
     ? req.body.progress_data
     : [];
 
+    console.log("Received activities for sync: ", activities);
   const topLevelGrade = req.body.grade_name || null;
 
   if (!activities.length) {
@@ -474,6 +475,7 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       activityType,
       subActivity: item.sub_activity || null,
       status,
+      activityMinutes: Number(item.activity_minutes || 0),
       score: parseScore(item.score),
       originalScore: parseScore(item.original_score),
       totalQuestions: parseScore(item.total_questions),
