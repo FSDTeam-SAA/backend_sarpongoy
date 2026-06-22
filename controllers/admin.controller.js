@@ -1,4 +1,4 @@
-﻿import bcrypt from "bcryptjs";
+import bcrypt from "bcryptjs";
 import AppError from "../errors/AppError.js";
 import { Course } from "../models/course.model.js";
 import { Lesson } from "../models/lesson.model.js";
@@ -176,11 +176,11 @@ const getStudentProgressSummary = async (studentId) => {
       completionRate:
         summary?.totalActivities > 0
           ? Number(
-              (
-                (summary.completedActivities / summary.totalActivities) *
-                100
-              ).toFixed(2),
-            )
+            (
+              (summary.completedActivities / summary.totalActivities) *
+              100
+            ).toFixed(2),
+          )
           : 0,
     },
     subjectProgress: bySubject,
@@ -870,21 +870,21 @@ export const updateTeacher = catchAsync(async (req, res, next) => {
     teacher.courses = req.body.courseIds;
   }
 
-if (req.files?.picture?.[0]) {
-  const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
-  teacher.picture = {
-    url: upload.secure_url,
-    public_id: upload.public_id,
-  };
-}
+  if (req.files?.picture?.[0]) {
+    const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
+    teacher.picture = {
+      url: upload.secure_url,
+      public_id: upload.public_id,
+    };
+  }
 
-if (req.files?.file?.[0]) {
-  const upload = await uploadOnCloudinary(req.files.file[0].buffer, "files");
-  teacher.file = {
-    url: upload.secure_url,
-    public_id: upload.public_id,
-  };
-}
+  if (req.files?.file?.[0]) {
+    const upload = await uploadOnCloudinary(req.files.file[0].buffer, "files");
+    teacher.file = {
+      url: upload.secure_url,
+      public_id: upload.public_id,
+    };
+  }
 
   await Promise.all([teacher.save(), user.save()]);
   await syncSchoolCounts(teacher.school);
@@ -953,8 +953,8 @@ export const addSchool = catchAsync(async (req, res, next) => {
 
   const normalizedGradeLevels = Array.isArray(gradeLevels)
     ? gradeLevels
-        .map((item) => normalizeGradeLevel(item))
-        .filter((item) => GRADE_LEVELS.includes(item))
+      .map((item) => normalizeGradeLevel(item))
+      .filter((item) => GRADE_LEVELS.includes(item))
     : [];
 
   const school = await School.create({
@@ -1033,8 +1033,8 @@ export const addCourse = catchAsync(async (req, res, next) => {
 
   const normalizedGradeLevels = Array.isArray(gradeLevels)
     ? gradeLevels
-        .map((item) => normalizeGradeLevel(item))
-        .filter((item) => GRADE_LEVELS.includes(item))
+      .map((item) => normalizeGradeLevel(item))
+      .filter((item) => GRADE_LEVELS.includes(item))
     : [];
 
   const image = {};
@@ -1275,13 +1275,13 @@ export const updateMyProfile = catchAsync(async (req, res) => {
     payload.email = String(payload.email).trim().toLowerCase();
   }
 
-if (req.files?.picture?.[0]) {
-  const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
-  payload.profile = {
-    url: upload.secure_url,
-    public_id: upload.public_id,
-  };
-}
+  if (req.files?.picture?.[0]) {
+    const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
+    payload.profile = {
+      url: upload.secure_url,
+      public_id: upload.public_id,
+    };
+  }
 
   const user = await User.findByIdAndUpdate(req.user._id, payload, {
     new: true,

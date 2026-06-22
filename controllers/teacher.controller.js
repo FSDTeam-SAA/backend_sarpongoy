@@ -230,7 +230,7 @@ const getRangeDays = (range) => {
   if (!range?.start || !range?.end) return null;
   const diff = Math.ceil(
     (new Date(range.end).getTime() - new Date(range.start).getTime()) /
-      DAY_IN_MS,
+    DAY_IN_MS,
   );
   return Math.max(diff + 1, 1);
 };
@@ -692,9 +692,9 @@ const getSubjectPerformanceSeries = async ({
 
   const rangeDays = range
     ? Math.max(
-        Math.ceil((range.end.getTime() - range.start.getTime()) / DAY_IN_MS),
-        1,
-      )
+      Math.ceil((range.end.getTime() - range.start.getTime()) / DAY_IN_MS),
+      1,
+    )
     : 7;
 
   const raw = await Progress.aggregate([
