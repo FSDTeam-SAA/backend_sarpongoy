@@ -58,6 +58,12 @@ const userSchema = new Schema(
       verified: { type: Boolean, default: false },
     },
     refreshToken: { type: String, default: "", select: false },
+    mac_id: {
+  type: String,
+  trim: true,
+  default: "",
+  index: true,
+},
     isEmailVerified: { type: Boolean, default: false },
     lastLoginAt: { type: Date, default: null, index: true },
     deleteReason: { type: String, default: "" },
