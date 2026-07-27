@@ -191,39 +191,74 @@ export const registerAdmin = catchAsync(async (req, res, next) => {
 });
 
 export const login = catchAsync(async (req, res, next) => {
-  const { email, userId, password } = req.body;
+  const { email, userId, password, mac_id } = req.body;
 
-  if ((!email && !userId) || !password) {
-    return next(new AppError(400, "email or userId and password are required"));
+  // Validate request
+  if ((!email && !userId) || !password || !mac_id) {
+    return next(
+      new AppError(
+        400,
+        "email or userId, password and mac_id are required"
+      )
+    );
   }
 
+  // Normalize MAC ID
+  const incomingMacId = String(mac_id).trim().toUpperCase();
+
+  // Find user
   const query = email
     ? { email: String(email).trim().toLowerCase() }
     : { userId: String(userId).trim().toUpperCase() };
 
-  const user = await User.findOne(query).select("+password +refreshToken");
+  const user = await User.findOne(query).select(
+    "+password +refreshToken"
+  );
+
   if (!user) {
     return next(new AppError(401, "No user found"));
   }
 
+  // Check account status
   if (user.status !== "active") {
     return next(new AppError(403, "Account is inactive"));
   }
 
+  // Verify password
   const isMatch = await User.isPasswordMatched(password, user.password);
+
   if (!isMatch) {
     return next(new AppError(401, "Incorrect password"));
   }
 
+  // Only admin can login using email
   if (email && user.role !== "admin") {
     return next(new AppError(403, "Only admin can login with email"));
   }
 
+  // First login -> Register device
+  if (!user.mac_id) {
+    user.mac_id = incomingMacId;
+  }
+  // Later logins -> Verify device
+  else if (user.mac_id !== incomingMacId) {
+    return next(
+      new AppError(
+        403,
+        "This account is already registered to another device."
+      )
+    );
+  }
+
+  // Generate tokens
   const { accessToken, refreshToken } = createAuthTokens(user);
+
   user.refreshToken = refreshToken;
   user.lastLoginAt = new Date();
+
   await user.save();
 
+  // Store refresh token in cookie
   res.cookie("refreshToken", refreshToken, {
     secure: process.env.NODE_ENV === "production",
     httpOnly: true,
@@ -231,6 +266,7 @@ export const login = catchAsync(async (req, res, next) => {
     maxAge: 1000 * 60 * 60 * 24 * 7,
   });
 
+  // Response
   sendResponse(res, {
     statusCode: 200,
     success: true,
