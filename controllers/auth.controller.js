@@ -194,17 +194,14 @@ export const login = catchAsync(async (req, res, next) => {
   const { email, userId, password, mac_id } = req.body;
 
   // Validate request
-  if ((!email && !userId) || !password || !mac_id) {
+  if ((!email && !userId) || !password) {
     return next(
       new AppError(
         400,
-        "email or userId, password and mac_id are required"
+        "email or userId and password are required"
       )
     );
   }
-
-  // Normalize MAC ID
-  const incomingMacId = String(mac_id).trim().toUpperCase();
 
   // Find user
   const query = email
@@ -236,18 +233,28 @@ export const login = catchAsync(async (req, res, next) => {
     return next(new AppError(403, "Only admin can login with email"));
   }
 
-  // First login -> Register device
-  if (!user.mac_id) {
-    user.mac_id = incomingMacId;
-  }
-  // Later logins -> Verify device
-  else if (user.mac_id !== incomingMacId) {
-    return next(
-      new AppError(
-        403,
-        "This account is already registered to another device."
-      )
-    );
+  // Device locking is for app users. Admin dashboard email login should not
+  // require a client MAC/device identifier.
+  if (user.role !== "admin") {
+    if (!mac_id) {
+      return next(new AppError(400, "mac_id is required"));
+    }
+
+    const incomingMacId = String(mac_id).trim().toUpperCase();
+
+    // First login -> Register device
+    if (!user.mac_id) {
+      user.mac_id = incomingMacId;
+    }
+    // Later logins -> Verify device
+    else if (user.mac_id !== incomingMacId) {
+      return next(
+        new AppError(
+          403,
+          "This account is already registered to another device."
+        )
+      );
+    }
   }
 
   // Generate tokens
