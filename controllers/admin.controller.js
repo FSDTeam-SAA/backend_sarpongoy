@@ -274,6 +274,18 @@ const parseBulkItems = (body, key) => {
   return items;
 };
 
+const runInChunks = async (items, chunkSize, handler) => {
+  const results = [];
+  for (let index = 0; index < items.length; index += chunkSize) {
+    const chunk = items.slice(index, index + chunkSize);
+    const chunkResults = await Promise.all(
+      chunk.map((item, chunkIndex) => handler(item, index + chunkIndex)),
+    );
+    results.push(...chunkResults);
+  }
+  return results;
+};
+
 const normalizeGradeLevels = (gradeLevels) =>
   parseArrayField(gradeLevels)
     .map((item) => normalizeGradeLevel(item))
@@ -645,13 +657,24 @@ export const addBulkStudents = catchAsync(async (req, res) => {
   const failed = [];
   const touchedSchoolIds = new Set();
 
-  for (const [index, student] of students.entries()) {
+  const results = await runInChunks(students, 10, async (student, index) => {
     try {
       const result = await createStudentRecord(student);
-      created.push(result.item);
-      touchedSchoolIds.add(String(result.schoolId));
+      return { type: "created", result };
     } catch (error) {
-      failed.push({ index, item: student, ...serializeBulkError(error) });
+      return {
+        type: "failed",
+        failure: { index, item: student, ...serializeBulkError(error) },
+      };
+    }
+  });
+
+  for (const item of results) {
+    if (item.type === "created") {
+      created.push(item.result.item);
+      touchedSchoolIds.add(String(item.result.schoolId));
+    } else {
+      failed.push(item.failure);
     }
   }
 
