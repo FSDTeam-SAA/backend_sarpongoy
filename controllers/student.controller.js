@@ -65,40 +65,8 @@ const getSummary = async (studentId) => {
           $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
         },
         totalMinutes: { $sum: "$activityMinutes" },
-        quizScoreTotal: {
-          $sum: {
-            $cond: [
-              {
-                $and: [
-                  { $eq: ["$activityType", "quiz"] },
-                  { $ne: ["$score", null] },
-                  { $gt: ["$totalQuestions", 0] },
-                ],
-              },
-              {
-                $multiply: [
-                  { $divide: ["$score", "$totalQuestions"] },
-                  100,
-                ],
-              },
-              0,
-            ],
-          },
-        },
-        quizCount: {
-          $sum: {
-            $cond: [
-              {
-                $and: [
-                  { $eq: ["$activityType", "quiz"] },
-                  { $ne: ["$score", null] },
-                  { $gt: ["$totalQuestions", 0] },
-                ],
-              },
-              1,
-              0,
-            ],
-          },
+        avgQuizScore: {
+          $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
         },
       },
     },
@@ -108,13 +76,7 @@ const getSummary = async (studentId) => {
     totalActivities: summary?.totalActivities || 0,
     completedActivities: summary?.completedActivities || 0,
     totalHours: Number(((summary?.totalMinutes || 0) / 60 || 0).toFixed(2)),
-    avgQuizScore: Number(
-      (
-        (summary?.quizCount || 0) > 0
-          ? summary.quizScoreTotal / summary.quizCount
-          : 0
-      ).toFixed(2),
-    ),
+    avgQuizScore: Number((summary?.avgQuizScore || 0).toFixed(2)),
     completionRate:
       summary?.totalActivities > 0
         ? Number(
@@ -623,40 +585,8 @@ export const getStudentProgress = catchAsync(async (req, res) => {
           $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
         },
         totalMinutes: { $sum: "$activityMinutes" },
-        quizScoreTotal: {
-          $sum: {
-            $cond: [
-              {
-                $and: [
-                  { $eq: ["$activityType", "quiz"] },
-                  { $ne: ["$score", null] },
-                  { $gt: ["$totalQuestions", 0] },
-                ],
-              },
-              {
-                $multiply: [
-                  { $divide: ["$score", "$totalQuestions"] },
-                  100,
-                ],
-              },
-              0,
-            ],
-          },
-        },
-        quizCount: {
-          $sum: {
-            $cond: [
-              {
-                $and: [
-                  { $eq: ["$activityType", "quiz"] },
-                  { $ne: ["$score", null] },
-                  { $gt: ["$totalQuestions", 0] },
-                ],
-              },
-              1,
-              0,
-            ],
-          },
+        avgQuizScore: {
+          $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
         },
       },
     },
@@ -676,18 +606,7 @@ export const getStudentProgress = catchAsync(async (req, res) => {
         subject: "$course.name",
         totalHours: { $round: [{ $divide: ["$totalMinutes", 60] }, 2] },
         activityCount: "$totalActivities",
-        avgQuizScore: {
-          $round: [
-            {
-              $cond: [
-                { $gt: ["$quizCount", 0] },
-                { $divide: ["$quizScoreTotal", "$quizCount"] },
-                0,
-              ],
-            },
-            2,
-          ],
-        },
+        avgQuizScore: { $round: ["$avgQuizScore", 2] },
         completionRate: {
           $cond: [
             { $eq: ["$totalActivities", 0] },
@@ -751,25 +670,10 @@ export const getStudentSubjectProgress = catchAsync(async (req, res, next) => {
     ).length,
     avgQuizScore:
       activities
-        .filter(
-          (item) =>
-            item.activityType === "quiz" &&
-            item.score !== null &&
-            item.totalQuestions &&
-            item.totalQuestions > 0,
-        )
-        .reduce(
-          (acc, item) => acc + (item.score / item.totalQuestions) * 100,
-          0,
-        ) /
+        .filter((item) => item.activityType === "quiz")
+        .reduce((acc, item) => acc + (item.score || 0), 0) /
       Math.max(
-        activities.filter(
-          (item) =>
-            item.activityType === "quiz" &&
-            item.score !== null &&
-            item.totalQuestions &&
-            item.totalQuestions > 0,
-        ).length,
+        activities.filter((item) => item.activityType === "quiz").length,
         1,
       ),
   };
