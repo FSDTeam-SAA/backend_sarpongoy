@@ -65,8 +65,37 @@ const getSummary = async (studentId) => {
           $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
         },
         totalMinutes: { $sum: "$activityMinutes" },
-        avgQuizScore: {
-          $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
+        quizScoreTotal: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              {
+                $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100],
+              },
+              0,
+            ],
+          },
+        },
+        quizCount: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
         },
       },
     },
@@ -76,19 +105,23 @@ const getSummary = async (studentId) => {
     totalActivities: summary?.totalActivities || 0,
     completedActivities: summary?.completedActivities || 0,
     totalHours: Number(((summary?.totalMinutes || 0) / 60 || 0).toFixed(2)),
-    avgQuizScore: Number((summary?.avgQuizScore || 0).toFixed(2)),
+    avgQuizScore: Number(
+      ((summary?.quizCount || 0) > 0
+        ? summary.quizScoreTotal / summary.quizCount
+        : 0
+      ).toFixed(2),
+    ),
     completionRate:
       summary?.totalActivities > 0
         ? Number(
-          (
-            (summary.completedActivities / summary.totalActivities) *
-            100
-          ).toFixed(2),
-        )
+            (
+              (summary.completedActivities / summary.totalActivities) *
+              100
+            ).toFixed(2),
+          )
         : 0,
   };
 };
-
 const buildTimelineFilter = (period) => {
   const now = new Date();
   if (period === "past_1_week") {
@@ -272,8 +305,16 @@ export const getStudentCourseContent = catchAsync(async (req, res, next) => {
 export const saveStudentActivity = catchAsync(async (req, res, next) => {
   const student = await ensureStudent(req.user._id);
   const {
-    lessonId, activityType, subActivity, status, score, activityMinutes,
-    originalScore, totalQuestions, practiceOriginalScore, quizOriginalScore
+    lessonId,
+    activityType,
+    subActivity,
+    status,
+    score,
+    activityMinutes,
+    originalScore,
+    totalQuestions,
+    practiceOriginalScore,
+    quizOriginalScore,
   } = req.body;
 
   if (!lessonId || !activityType) {
@@ -283,7 +324,8 @@ export const saveStudentActivity = catchAsync(async (req, res, next) => {
   const lesson = await Lesson.findById(lessonId);
   if (!lesson) return next(new AppError(404, "Lesson not found"));
 
-  const parseScore = (val) => (val !== undefined && val !== null && val !== "") ? Number(val) : null;
+  const parseScore = (val) =>
+    val !== undefined && val !== null && val !== "" ? Number(val) : null;
 
   const update = {
     status: status || "in_progress",
@@ -295,10 +337,14 @@ export const saveStudentActivity = catchAsync(async (req, res, next) => {
   };
 
   if (score !== undefined) update.score = parseScore(score);
-  if (originalScore !== undefined) update.originalScore = parseScore(originalScore);
-  if (totalQuestions !== undefined) update.totalQuestions = parseScore(totalQuestions);
-  if (practiceOriginalScore !== undefined) update.practiceOriginalScore = parseScore(practiceOriginalScore);
-  if (quizOriginalScore !== undefined) update.quizOriginalScore = parseScore(quizOriginalScore);
+  if (originalScore !== undefined)
+    update.originalScore = parseScore(originalScore);
+  if (totalQuestions !== undefined)
+    update.totalQuestions = parseScore(totalQuestions);
+  if (practiceOriginalScore !== undefined)
+    update.practiceOriginalScore = parseScore(practiceOriginalScore);
+  if (quizOriginalScore !== undefined)
+    update.quizOriginalScore = parseScore(quizOriginalScore);
 
   if (update.status === "completed") {
     update.completedAt = new Date();
@@ -362,21 +408,30 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
     .map((i) => i.lesson_id || i.lessonId || i.lesson)
     .filter((id) => mongoose.Types.ObjectId.isValid(id));
 
-  const existingLessons = await Lesson.find({ _id: { $in: validLessonIds } }).lean();
+  const existingLessons = await Lesson.find({
+    _id: { $in: validLessonIds },
+  }).lean();
   const lessonMap = new Map(existingLessons.map((l) => [String(l._id), l]));
 
-  const courseNames = [...new Set(activities.map((i) => i.course_name).filter(Boolean))];
+  const courseNames = [
+    ...new Set(activities.map((i) => i.course_name).filter(Boolean)),
+  ];
   const existingCourses = await Course.find({
-    name: { $in: courseNames.map((n) => new RegExp(`^${n.trim()}$`, "i")) }
+    name: { $in: courseNames.map((n) => new RegExp(`^${n.trim()}$`, "i")) },
   }).lean();
-  const courseMap = new Map(existingCourses.map((c) => [c.name.toLowerCase().trim(), c]));
+  const courseMap = new Map(
+    existingCourses.map((c) => [c.name.toLowerCase().trim(), c]),
+  );
 
   const existingProgress = await Progress.find({
     student: student._id,
-    lesson: { $in: validLessonIds }
+    lesson: { $in: validLessonIds },
   }).lean();
   const progressMap = new Map(
-    existingProgress.map((p) => [`${p.lesson}_${p.activityType}_${p.subActivity || null}`, p])
+    existingProgress.map((p) => [
+      `${p.lesson}_${p.activityType}_${p.subActivity || null}`,
+      p,
+    ]),
   );
 
   const bulkOps = [];
@@ -385,22 +440,35 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
   for (let idx = 0; idx < activities.length; idx += 1) {
     const item = activities[idx] || {};
     const lessonId = item.lesson_id || item.lessonId || item.lesson;
-    const activityType = String(item.activity_type || item.activityType || "").trim().toLowerCase();
+    const activityType = String(item.activity_type || item.activityType || "")
+      .trim()
+      .toLowerCase();
 
     if (!lessonId || !activityType) {
-      errors.push({ index: idx, reason: "lesson_id and activity_type are required" });
+      errors.push({
+        index: idx,
+        reason: "lesson_id and activity_type are required",
+      });
       continue;
     }
 
-    let lessonDoc = mongoose.Types.ObjectId.isValid(lessonId) ? lessonMap.get(String(lessonId)) : null;
-    let courseDoc = item.course_name ? courseMap.get(String(item.course_name).toLowerCase().trim()) : null;
+    let lessonDoc = mongoose.Types.ObjectId.isValid(lessonId)
+      ? lessonMap.get(String(lessonId))
+      : null;
+    let courseDoc = item.course_name
+      ? courseMap.get(String(item.course_name).toLowerCase().trim())
+      : null;
 
     // Fallback: Create Course if perfectly missing
     if (item.course_name && !courseDoc) {
       const normalizedCourseName = String(item.course_name).trim();
       courseDoc = await Course.create({
         name: normalizedCourseName,
-        gradeLevels: [normalizeGradeLevel(item.grade_name || topLevelGrade || student.gradeLevel)]
+        gradeLevels: [
+          normalizeGradeLevel(
+            item.grade_name || topLevelGrade || student.gradeLevel,
+          ),
+        ],
       });
       courseMap.set(normalizedCourseName.toLowerCase(), courseDoc);
     }
@@ -409,37 +477,49 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
     if (!lessonDoc && courseDoc) {
       const lessonQuery = {
         course: courseDoc._id,
-        gradeLevel: normalizeGradeLevel(item.grade_name || topLevelGrade || student.gradeLevel),
+        gradeLevel: normalizeGradeLevel(
+          item.grade_name || topLevelGrade || student.gradeLevel,
+        ),
         strand: item.strand_name,
         subStrand: item.sub_strand_name,
       };
       if (item.lesson_number) {
-        const parsed = parseInt(String(item.lesson_number).replace(/^\D+/g, ""), 10);
+        const parsed = parseInt(
+          String(item.lesson_number).replace(/^\D+/g, ""),
+          10,
+        );
         lessonQuery.lessonNumber = !isNaN(parsed) ? parsed : item.lesson_number;
       }
 
       lessonDoc = await Lesson.findOne(lessonQuery);
 
       if (!lessonDoc) {
-        const lessonTitle = (item.lesson_id && !mongoose.Types.ObjectId.isValid(item.lesson_id))
-          ? item.lesson_id
-          : (item.lesson_title || "Untitled Lesson");
+        const lessonTitle =
+          item.lesson_id && !mongoose.Types.ObjectId.isValid(item.lesson_id)
+            ? item.lesson_id
+            : item.lesson_title || "Untitled Lesson";
 
         lessonDoc = await Lesson.create({
           course: courseDoc._id,
-          gradeLevel: normalizeGradeLevel(item.grade_name || topLevelGrade || student.gradeLevel),
+          gradeLevel: normalizeGradeLevel(
+            item.grade_name || topLevelGrade || student.gradeLevel,
+          ),
           strand: item.strand_name || "Unknown Strand",
           subStrand: item.sub_strand_name || "Unknown Sub-strand",
           lessonNumber: lessonQuery.lessonNumber || 1,
           title: lessonTitle,
-          status: "active"
+          status: "active",
         });
       }
       lessonMap.set(String(lessonDoc._id), lessonDoc);
     }
 
     if (!lessonDoc) {
-      errors.push({ index: idx, lessonId, reason: "Lesson not found in database. Matching failed." });
+      errors.push({
+        index: idx,
+        lessonId,
+        reason: "Lesson not found in database. Matching failed.",
+      });
       continue;
     }
 
@@ -447,20 +527,29 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       courseDoc = await Course.findById(lessonDoc.course).lean();
     }
 
-    const status = (Number(item.is_completed) === 1 || item.is_completed === true) ? "completed" : "in_progress";
-    const incomingLastUpdated = item.last_updated ? new Date(item.last_updated) : new Date();
+    const status =
+      Number(item.is_completed) === 1 || item.is_completed === true
+        ? "completed"
+        : "in_progress";
+    const incomingLastUpdated = item.last_updated
+      ? new Date(item.last_updated)
+      : new Date();
 
     // --- Step 3: Conflict Resolution (Last Write Wins) ---
     const progressKey = `${lessonDoc._id}_${activityType}_${item.sub_activity || null}`;
     const existingRecord = progressMap.get(progressKey);
 
     // If existing record is newer than incoming, skip this update
-    if (existingRecord && new Date(existingRecord.lastUpdated) > incomingLastUpdated) {
+    if (
+      existingRecord &&
+      new Date(existingRecord.lastUpdated) > incomingLastUpdated
+    ) {
       skipped += 1;
       continue;
     }
 
-    const parseScore = (val) => (val !== undefined && val !== null && val !== "") ? Number(val) : null;
+    const parseScore = (val) =>
+      val !== undefined && val !== null && val !== "" ? Number(val) : null;
 
     const payload = {
       student: student._id,
@@ -499,8 +588,8 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
           subActivity: payload.subActivity,
         },
         update: { $set: payload },
-        upsert: true
-      }
+        upsert: true,
+      },
     });
 
     // Update in-memory map to resolve conflicts within the same request payload
@@ -515,7 +604,7 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
     } catch (error) {
       console.error("BulkWrite error : ", error);
       if (error.writeErrors) {
-        error.writeErrors.forEach(err => errors.push({ reason: err.errmsg }));
+        error.writeErrors.forEach((err) => errors.push({ reason: err.errmsg }));
         saved = bulkOps.length - error.writeErrors.length;
       } else {
         errors.push({ reason: error.message });
@@ -585,8 +674,37 @@ export const getStudentProgress = catchAsync(async (req, res) => {
           $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
         },
         totalMinutes: { $sum: "$activityMinutes" },
-        avgQuizScore: {
-          $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
+        quizScoreTotal: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              {
+                $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100],
+              },
+              0,
+            ],
+          },
+        },
+        quizCount: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
         },
       },
     },
@@ -606,7 +724,18 @@ export const getStudentProgress = catchAsync(async (req, res) => {
         subject: "$course.name",
         totalHours: { $round: [{ $divide: ["$totalMinutes", 60] }, 2] },
         activityCount: "$totalActivities",
-        avgQuizScore: { $round: ["$avgQuizScore", 2] },
+        avgQuizScore: {
+          $round: [
+            {
+              $cond: [
+                { $gt: ["$quizCount", 0] },
+                { $divide: ["$quizScoreTotal", "$quizCount"] },
+                0,
+              ],
+            },
+            2,
+          ],
+        },
         completionRate: {
           $cond: [
             { $eq: ["$totalActivities", 0] },
@@ -670,10 +799,25 @@ export const getStudentSubjectProgress = catchAsync(async (req, res, next) => {
     ).length,
     avgQuizScore:
       activities
-        .filter((item) => item.activityType === "quiz")
-        .reduce((acc, item) => acc + (item.score || 0), 0) /
+        .filter(
+          (item) =>
+            item.activityType === "quiz" &&
+            item.score !== null &&
+            item.totalQuestions &&
+            item.totalQuestions > 0,
+        )
+        .reduce(
+          (acc, item) => acc + (item.score / item.totalQuestions) * 100,
+          0,
+        ) /
       Math.max(
-        activities.filter((item) => item.activityType === "quiz").length,
+        activities.filter(
+          (item) =>
+            item.activityType === "quiz" &&
+            item.score !== null &&
+            item.totalQuestions &&
+            item.totalQuestions > 0,
+        ).length,
         1,
       ),
   };
