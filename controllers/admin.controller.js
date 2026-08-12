@@ -1,4 +1,4 @@
-﻿import bcrypt from "bcryptjs";
+import bcrypt from "bcryptjs";
 import AppError from "../errors/AppError.js";
 import { Course } from "../models/course.model.js";
 import { Lesson } from "../models/lesson.model.js";
@@ -176,11 +176,11 @@ const getStudentProgressSummary = async (studentId) => {
       completionRate:
         summary?.totalActivities > 0
           ? Number(
-              (
-                (summary.completedActivities / summary.totalActivities) *
-                100
-              ).toFixed(2),
-            )
+            (
+              (summary.completedActivities / summary.totalActivities) *
+              100
+            ).toFixed(2),
+          )
           : 0,
     },
     subjectProgress: bySubject,
@@ -205,7 +205,9 @@ const getStudentProgressSummary = async (studentId) => {
 };
 
 const ensureSchool = async ({ schoolId, schoolName }) => {
-  if (schoolId) return School.findById(schoolId);
+  if (schoolId && mongoose.Types.ObjectId.isValid(schoolId)) {
+    return School.findById(schoolId);
+  }
   if (schoolName) return School.findOne({ name: schoolName });
   return null;
 };
@@ -216,6 +218,337 @@ const ensureGrade = (gradeLevel) => {
     throw new AppError(400, "Invalid grade level");
   }
   return normalized;
+};
+
+const parseArrayField = (value) => {
+  if (value === undefined || value === null || value === "") return [];
+  if (Array.isArray(value)) return value;
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+
+    return trimmed
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  return [value];
+};
+
+const parseCourseIds = (payload) =>
+  parseArrayField(payload.courseIds ?? payload["courseIds[]"] ?? payload.courseId)
+    .map((item) => String(item).trim())
+    .filter(Boolean);
+
+const parseBulkItems = (body, key) => {
+  const value = body[key] ?? body.items ?? body.records;
+  let items = value;
+
+  if (typeof items === "string") {
+    try {
+      items = JSON.parse(items);
+    } catch {
+      throw new AppError(400, `${key} must be a JSON array`);
+    }
+  }
+
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new AppError(400, `${key} must be a non-empty array`);
+  }
+
+  if (items.length > 200) {
+    throw new AppError(400, "Bulk create supports up to 200 records at a time");
+  }
+
+  return items;
+};
+
+const runInChunks = async (items, chunkSize, handler) => {
+  const results = [];
+  for (let index = 0; index < items.length; index += chunkSize) {
+    const chunk = items.slice(index, index + chunkSize);
+    const chunkResults = await Promise.all(
+      chunk.map((item, chunkIndex) => handler(item, index + chunkIndex)),
+    );
+    results.push(...chunkResults);
+  }
+  return results;
+};
+
+const normalizeGradeLevels = (gradeLevels) =>
+  parseArrayField(gradeLevels)
+    .map((item) => normalizeGradeLevel(item))
+    .filter((item) => GRADE_LEVELS.includes(item));
+
+const serializeBulkError = (error) => ({
+  message: error?.message || "Failed to create record",
+});
+
+const createStudentRecord = async (payload, files) => {
+  const {
+    schoolId,
+    schoolName,
+    studentName,
+    name,
+    studentUserID,
+    userId,
+    studentPassword,
+    password,
+    confirmStudentPassword,
+    confirmPassword,
+    gradeLevel,
+    status,
+  } = payload;
+
+  const finalName = studentName || name;
+  const finalUserId = normalizeUserId(studentUserID || userId);
+  const finalPassword = studentPassword || password;
+  const finalConfirmPassword = confirmStudentPassword || confirmPassword;
+
+  if (
+    !finalName ||
+    !finalUserId ||
+    !finalPassword ||
+    !finalConfirmPassword ||
+    !gradeLevel
+  ) {
+    throw new AppError(
+      400,
+      "Name, userId, password, confirmPassword and gradeLevel are required",
+    );
+  }
+
+  if (finalPassword !== finalConfirmPassword) {
+    throw new AppError(400, "Passwords do not match");
+  }
+
+  const school = await ensureSchool({ schoolId, schoolName });
+  if (!school) {
+    throw new AppError(404, "School not found");
+  }
+
+  const exists = await User.findOne({ userId: finalUserId });
+  if (exists) {
+    throw new AppError(409, "User ID already exists");
+  }
+
+  const grade = ensureGrade(gradeLevel);
+  const nextStatus = status || "active";
+
+  const user = await User.create({
+    name: finalName,
+    userId: finalUserId,
+    password: finalPassword,
+    role: "student",
+    school: school._id,
+    gradeLevel: grade,
+    status: nextStatus,
+  });
+
+  const securityQuestions = await parseSecurityQuestions(payload);
+
+  const picture = {};
+  if (files?.picture?.[0]) {
+    const uploadResult = await uploadOnCloudinary(
+      files.picture[0].buffer,
+      "profiles",
+    );
+    picture.url = uploadResult.secure_url;
+    picture.public_id = uploadResult.public_id;
+  }
+
+  const file = {};
+  if (files?.file?.[0]) {
+    const uploadResult = await uploadOnCloudinary(files.file[0].buffer, "files");
+    file.url = uploadResult.secure_url;
+    file.public_id = uploadResult.public_id;
+  }
+
+  let student;
+  try {
+    student = await Student.create({
+      user: user._id,
+      school: school._id,
+      name: finalName,
+      gradeLevel: grade,
+      status: nextStatus,
+      securityQuestions,
+      picture,
+      file,
+    });
+  } catch (error) {
+    await User.findByIdAndDelete(user._id);
+    throw error;
+  }
+
+  return {
+    schoolId: school._id,
+    item: {
+      _id: student._id,
+      studentName: student.name,
+      userId: user.userId,
+      schoolName: school.name,
+      schoolId: school._id,
+      gradeLevel: student.gradeLevel,
+      status: student.status,
+      picture: student.picture,
+    },
+  };
+};
+
+const createTeacherRecord = async (payload, files) => {
+  const {
+    schoolId,
+    schoolName,
+    teacherName,
+    name,
+    teacherUserID,
+    userId,
+    teacherPassword,
+    password,
+    confirmTeacherPassword,
+    confirmPassword,
+    gradeLevel,
+    status,
+  } = payload;
+
+  const finalName = teacherName || name;
+  const finalUserId = normalizeUserId(teacherUserID || userId);
+  const finalPassword = teacherPassword || password;
+  const finalConfirmPassword = confirmTeacherPassword || confirmPassword;
+  const { firstName, lastName } = splitNameParts(finalName);
+
+  if (
+    !finalName ||
+    !finalUserId ||
+    !finalPassword ||
+    !finalConfirmPassword ||
+    !gradeLevel
+  ) {
+    throw new AppError(
+      400,
+      "Name, userId, password, confirmPassword and gradeLevel are required",
+    );
+  }
+
+  if (finalPassword !== finalConfirmPassword) {
+    throw new AppError(400, "Passwords do not match");
+  }
+
+  const school = await ensureSchool({ schoolId, schoolName });
+  if (!school) throw new AppError(404, "School not found");
+
+  const exists = await User.findOne({ userId: finalUserId });
+  if (exists) throw new AppError(409, "User ID already exists");
+
+  const teacherCourses = parseCourseIds(payload);
+  if (teacherCourses.length > 0) {
+    const invalidCourseIds = teacherCourses.filter(
+      (courseId) => !mongoose.Types.ObjectId.isValid(courseId),
+    );
+    if (invalidCourseIds.length > 0) {
+      throw new AppError(400, "Some course IDs are invalid");
+    }
+
+    const validCount = await Course.countDocuments({
+      _id: { $in: teacherCourses },
+    });
+    if (validCount !== teacherCourses.length) {
+      throw new AppError(400, "Some course IDs are invalid");
+    }
+  }
+
+  const grade = ensureGrade(gradeLevel);
+  const nextStatus = status || "active";
+
+  const user = await User.create({
+    name: finalName,
+    firstName,
+    lastName,
+    userId: finalUserId,
+    password: finalPassword,
+    role: "teacher",
+    school: school._id,
+    gradeLevel: grade,
+    status: nextStatus,
+  });
+
+  const picture = {};
+  if (files?.picture?.[0]) {
+    const upload = await uploadOnCloudinary(files.picture[0].buffer, "profiles");
+    picture.url = upload.secure_url;
+    picture.public_id = upload.public_id;
+  }
+
+  const file = {};
+  if (files?.file?.[0]) {
+    const upload = await uploadOnCloudinary(files.file[0].buffer, "files");
+    file.url = upload.secure_url;
+    file.public_id = upload.public_id;
+  }
+
+  let teacher;
+  try {
+    teacher = await Teacher.create({
+      user: user._id,
+      firstName,
+      lastName,
+      school: school._id,
+      name: finalName,
+      gradeLevel: grade,
+      courses: teacherCourses,
+      status: nextStatus,
+      picture,
+      file,
+    });
+  } catch (error) {
+    await User.findByIdAndDelete(user._id);
+    throw error;
+  }
+
+  return {
+    schoolId: school._id,
+    item: {
+      _id: teacher._id,
+      teacherName: teacher.name,
+      userId: user.userId,
+      schoolName: school.name,
+      schoolId: school._id,
+      gradeLevel: teacher.gradeLevel,
+      status: teacher.status,
+    },
+  };
+};
+
+const createSchoolRecord = async (payload) => {
+  const { name, schoolCode, gradeLevels, gradeLevel, status } = payload;
+  if (!name || !schoolCode) {
+    throw new AppError(400, "name and schoolCode are required");
+  }
+
+  const code = String(schoolCode).trim().toUpperCase();
+  const normalizedGradeLevels = normalizeGradeLevels(
+    gradeLevels ?? (gradeLevel ? [gradeLevel] : []),
+  );
+
+  return School.create({
+    name,
+    schoolCode: code,
+    schooleCode: code,
+    gradeLevels: normalizedGradeLevels,
+    status: status || "active",
+  });
 };
 
 export const getAdminDashboard = catchAsync(async (req, res) => {
@@ -255,6 +588,7 @@ export const getAdminDashboard = catchAsync(async (req, res) => {
         { $sort: { completed: -1 } },
       ]),
       Student.aggregate([
+        { $match: { createdAt: { $type: "date" } } },
         {
           $group: {
             _id: { $dateToString: { format: "%Y-%m", date: "$createdAt" } },
@@ -265,6 +599,7 @@ export const getAdminDashboard = catchAsync(async (req, res) => {
         { $project: { _id: 0, month: "$_id", total: 1 } },
       ]),
       Progress.aggregate([
+        { $match: { performedAt: { $type: "date" } } },
         {
           $project: {
             weekday: { $dayOfWeek: "$performedAt" },
@@ -305,116 +640,56 @@ export const getAdminDashboard = catchAsync(async (req, res) => {
   });
 });
 export const addNewStudent = catchAsync(async (req, res, next) => {
-  const {
-    schoolId,
-    schoolName,
-    studentName,
-    name,
-    studentUserID,
-    userId,
-    studentPassword,
-    password,
-    confirmStudentPassword,
-    confirmPassword,
-    gradeLevel,
-    status,
-  } = req.body;
-
-  const finalName = studentName || name;
-  const finalUserId = normalizeUserId(studentUserID || userId);
-  const finalPassword = studentPassword || password;
-  const finalConfirmPassword = confirmStudentPassword || confirmPassword;
-
-  if (
-    !finalName ||
-    !finalUserId ||
-    !finalPassword ||
-    !finalConfirmPassword ||
-    !gradeLevel
-  ) {
-    return next(
-      new AppError(
-        400,
-        "Name, userId, password, confirmPassword and gradeLevel are required",
-      ),
-    );
-  }
-
-  if (finalPassword !== finalConfirmPassword) {
-    return next(new AppError(400, "Passwords do not match"));
-  }
-
-  const school = await ensureSchool({
-    schoolId: mongoose.Types.ObjectId.isValid(schoolId) ? schoolId : undefined,
-    schoolName,
-  });
-  if (!school) {
-    return next(new AppError(404, "School not found"));
-  }
-
-  const exists = await User.findOne({ userId: finalUserId });
-  if (exists) {
-    return next(new AppError(409, "User ID already exists"));
-  }
-
-  const user = await User.create({
-    name: finalName,
-    userId: finalUserId,
-    password: finalPassword,
-    role: "student",
-    school: school._id,
-    gradeLevel: ensureGrade(gradeLevel),
-    status: status || "active",
-  });
-
-  const securityQuestions = await parseSecurityQuestions(req.body);
-
-  const picture = {};
-  if (req.files?.picture?.[0]) {
-    const uploadResult = await uploadOnCloudinary(
-      req.files.picture[0].buffer,
-      "profiles",
-    );
-    picture.url = uploadResult.secure_url;
-    picture.public_id = uploadResult.public_id;
-  }
-
-  const file = {};
-  if (req.files?.file?.[0]) {
-    const uploadResult = await uploadOnCloudinary(
-      req.files.file[0].buffer,
-      "files",
-    );
-    file.url = uploadResult.secure_url;
-    file.public_id = uploadResult.public_id;
-  }
-
-  const student = await Student.create({
-    user: user._id,
-    school: school._id,
-    name: finalName,
-    gradeLevel: ensureGrade(gradeLevel),
-    status: status || "active",
-    securityQuestions,
-    picture,
-    file,
-  });
-
-  await syncSchoolCounts(school._id);
+  const created = await createStudentRecord(req.body, req.files);
+  await syncSchoolCounts(created.schoolId);
 
   sendResponse(res, {
     statusCode: 201,
     success: true,
     message: "Student created successfully",
-    data: {
-      _id: student._id,
-      studentName: student.name,
-      userId: user.userId,
-      schoolName: school.name,
-      gradeLevel: student.gradeLevel,
-      status: student.status,
-      picture: student.picture,
-    },
+    data: created.item,
+  });
+});
+
+export const addBulkStudents = catchAsync(async (req, res) => {
+  const students = parseBulkItems(req.body, "students");
+  const created = [];
+  const failed = [];
+  const touchedSchoolIds = new Set();
+
+  const results = await runInChunks(students, 10, async (student, index) => {
+    try {
+      const result = await createStudentRecord(student);
+      return { type: "created", result };
+    } catch (error) {
+      return {
+        type: "failed",
+        failure: { index, item: student, ...serializeBulkError(error) },
+      };
+    }
+  });
+
+  for (const item of results) {
+    if (item.type === "created") {
+      created.push(item.result.item);
+      touchedSchoolIds.add(String(item.result.schoolId));
+    } else {
+      failed.push(item.failure);
+    }
+  }
+
+  await Promise.all(
+    [...touchedSchoolIds].map((schoolId) => syncSchoolCounts(schoolId)),
+  );
+
+  sendResponse(res, {
+    statusCode: 201,
+    success: failed.length === 0,
+    message:
+      failed.length === 0
+        ? "Students created successfully"
+        : "Bulk student create completed with some failures",
+    data: { created, failed },
   });
 });
 
@@ -614,119 +889,45 @@ export const deleteStudent = catchAsync(async (req, res, next) => {
 });
 
 export const addNewTeacher = catchAsync(async (req, res, next) => {
-  const {
-    schoolId,
-    schoolName,
-    teacherName,
-    name,
-    teacherUserID,
-    userId,
-    teacherPassword,
-    password,
-    confirmTeacherPassword,
-    confirmPassword,
-    gradeLevel,
-    courseIds,
-    status,
-  } = req.body;
-
-  const finalName = teacherName || name;
-  const finalUserId = normalizeUserId(teacherUserID || userId);
-  const finalPassword = teacherPassword || password;
-  const finalConfirmPassword = confirmTeacherPassword || confirmPassword;
-  const { firstName, lastName } = splitNameParts(finalName);
-
-  if (
-    !finalName ||
-    !finalUserId ||
-    !finalPassword ||
-    !finalConfirmPassword ||
-    !gradeLevel
-  ) {
-    return next(
-      new AppError(
-        400,
-        "Name, userId, password, confirmPassword and gradeLevel are required",
-      ),
-    );
-  }
-
-  if (finalPassword !== finalConfirmPassword) {
-    return next(new AppError(400, "Passwords do not match"));
-  }
-
-  const school = await ensureSchool({ schoolId, schoolName });
-  if (!school) return next(new AppError(404, "School not found"));
-
-  const exists = await User.findOne({ userId: finalUserId });
-  if (exists) return next(new AppError(409, "User ID already exists"));
-
-  const teacherCourses = Array.isArray(courseIds) ? courseIds : [];
-  if (teacherCourses.length > 0) {
-    const validCount = await Course.countDocuments({
-      _id: { $in: teacherCourses },
-    });
-    if (validCount !== teacherCourses.length) {
-      return next(new AppError(400, "Some course IDs are invalid"));
-    }
-  }
-
-  const user = await User.create({
-    name: finalName,
-    firstName,
-    lastName,
-    userId: finalUserId,
-    password: finalPassword,
-    role: "teacher",
-    school: school._id,
-    gradeLevel: ensureGrade(gradeLevel),
-    status: status || "active",
-  });
-
-  const picture = {};
-  if (req.files?.picture?.[0]) {
-    const upload = await uploadOnCloudinary(
-      req.files.picture[0].buffer,
-      "profiles",
-    );
-    picture.url = upload.secure_url;
-    picture.public_id = upload.public_id;
-  }
-
-  const file = {};
-  if (req.files?.file?.[0]) {
-    const upload = await uploadOnCloudinary(req.files.file[0].buffer, "files");
-    file.url = upload.secure_url;
-    file.public_id = upload.public_id;
-  }
-
-  const teacher = await Teacher.create({
-    user: user._id,
-    firstName,
-    lastName,
-    school: school._id,
-    name: finalName,
-    gradeLevel: ensureGrade(gradeLevel),
-    courses: teacherCourses,
-    status: status || "active",
-    picture,
-    file,
-  });
-
-  await syncSchoolCounts(school._id);
+  const created = await createTeacherRecord(req.body, req.files);
+  await syncSchoolCounts(created.schoolId);
 
   sendResponse(res, {
     statusCode: 201,
     success: true,
     message: "Teacher created successfully",
-    data: {
-      _id: teacher._id,
-      teacherName: teacher.name,
-      userId: user.userId,
-      schoolName: school.name,
-      gradeLevel: teacher.gradeLevel,
-      status: teacher.status,
-    },
+    data: created.item,
+  });
+});
+
+export const addBulkTeachers = catchAsync(async (req, res) => {
+  const teachers = parseBulkItems(req.body, "teachers");
+  const created = [];
+  const failed = [];
+  const touchedSchoolIds = new Set();
+
+  for (const [index, teacher] of teachers.entries()) {
+    try {
+      const result = await createTeacherRecord(teacher);
+      created.push(result.item);
+      touchedSchoolIds.add(String(result.schoolId));
+    } catch (error) {
+      failed.push({ index, item: teacher, ...serializeBulkError(error) });
+    }
+  }
+
+  await Promise.all(
+    [...touchedSchoolIds].map((schoolId) => syncSchoolCounts(schoolId)),
+  );
+
+  sendResponse(res, {
+    statusCode: 201,
+    success: failed.length === 0,
+    message:
+      failed.length === 0
+        ? "Teachers created successfully"
+        : "Bulk teacher create completed with some failures",
+    data: { created, failed },
   });
 });
 
@@ -870,21 +1071,21 @@ export const updateTeacher = catchAsync(async (req, res, next) => {
     teacher.courses = req.body.courseIds;
   }
 
-if (req.files?.picture?.[0]) {
-  const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
-  teacher.picture = {
-    url: upload.secure_url,
-    public_id: upload.public_id,
-  };
-}
+  if (req.files?.picture?.[0]) {
+    const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
+    teacher.picture = {
+      url: upload.secure_url,
+      public_id: upload.public_id,
+    };
+  }
 
-if (req.files?.file?.[0]) {
-  const upload = await uploadOnCloudinary(req.files.file[0].buffer, "files");
-  teacher.file = {
-    url: upload.secure_url,
-    public_id: upload.public_id,
-  };
-}
+  if (req.files?.file?.[0]) {
+    const upload = await uploadOnCloudinary(req.files.file[0].buffer, "files");
+    teacher.file = {
+      url: upload.secure_url,
+      public_id: upload.public_id,
+    };
+  }
 
   await Promise.all([teacher.save(), user.save()]);
   await syncSchoolCounts(teacher.school);
@@ -946,30 +1147,37 @@ export const getSchools = catchAsync(async (req, res) => {
 });
 
 export const addSchool = catchAsync(async (req, res, next) => {
-  const { name, schoolCode, gradeLevels, status } = req.body;
-  if (!name || !schoolCode) {
-    return next(new AppError(400, "name and schoolCode are required"));
-  }
-
-  const normalizedGradeLevels = Array.isArray(gradeLevels)
-    ? gradeLevels
-        .map((item) => normalizeGradeLevel(item))
-        .filter((item) => GRADE_LEVELS.includes(item))
-    : [];
-
-  const school = await School.create({
-    name,
-    schoolCode: String(schoolCode).trim().toUpperCase(),
-    schooleCode: String(schoolCode).trim().toUpperCase(),
-    gradeLevels: normalizedGradeLevels,
-    status: status || "active",
-  });
+  const school = await createSchoolRecord(req.body);
 
   sendResponse(res, {
     statusCode: 201,
     success: true,
     message: "School created successfully",
     data: school,
+  });
+});
+
+export const addBulkSchools = catchAsync(async (req, res) => {
+  const schools = parseBulkItems(req.body, "schools");
+  const created = [];
+  const failed = [];
+
+  for (const [index, school] of schools.entries()) {
+    try {
+      created.push(await createSchoolRecord(school));
+    } catch (error) {
+      failed.push({ index, item: school, ...serializeBulkError(error) });
+    }
+  }
+
+  sendResponse(res, {
+    statusCode: 201,
+    success: failed.length === 0,
+    message:
+      failed.length === 0
+        ? "Schools created successfully"
+        : "Bulk school create completed with some failures",
+    data: { created, failed },
   });
 });
 
@@ -1033,8 +1241,8 @@ export const addCourse = catchAsync(async (req, res, next) => {
 
   const normalizedGradeLevels = Array.isArray(gradeLevels)
     ? gradeLevels
-        .map((item) => normalizeGradeLevel(item))
-        .filter((item) => GRADE_LEVELS.includes(item))
+      .map((item) => normalizeGradeLevel(item))
+      .filter((item) => GRADE_LEVELS.includes(item))
     : [];
 
   const image = {};
@@ -1275,13 +1483,13 @@ export const updateMyProfile = catchAsync(async (req, res) => {
     payload.email = String(payload.email).trim().toLowerCase();
   }
 
-if (req.files?.picture?.[0]) {
-  const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
-  payload.profile = {
-    url: upload.secure_url,
-    public_id: upload.public_id,
-  };
-}
+  if (req.files?.picture?.[0]) {
+    const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
+    payload.profile = {
+      url: upload.secure_url,
+      public_id: upload.public_id,
+    };
+  }
 
   const user = await User.findByIdAndUpdate(req.user._id, payload, {
     new: true,

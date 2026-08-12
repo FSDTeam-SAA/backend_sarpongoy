@@ -1,4 +1,4 @@
-﻿import { Schema, model } from "mongoose";
+import { Schema, model } from "mongoose";
 
 const progressSchema = new Schema(
   {
@@ -91,6 +91,14 @@ const progressSchema = new Schema(
     lastUpdated: { type: Date },
     completedAt: { type: Date },
     performedAt: { type: Date, default: Date.now, index: true },
+    practiceOriginalScore: {
+      type: Number,
+      default: null,
+    },
+    quizOriginalScore: {
+      type: Number,
+      default: null,
+    },
   },
   { timestamps: true },
 );

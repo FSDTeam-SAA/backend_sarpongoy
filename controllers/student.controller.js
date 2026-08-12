@@ -1,4 +1,4 @@
-﻿import AppError from "../errors/AppError.js";
+import AppError from "../errors/AppError.js";
 import { Course } from "../models/course.model.js";
 import { Lesson } from "../models/lesson.model.js";
 import { Progress } from "../models/progress.model.js";
@@ -8,6 +8,7 @@ import { User } from "../models/user.model.js";
 import { normalizeGradeLevel } from "../utils/grade.js";
 import catchAsync from "../utils/catchAsync.js";
 import sendResponse from "../utils/sendResponse.js";
+import { parsePagination, getPaginationMeta } from "../utils/pagination.js";
 import { uploadOnCloudinary } from "../utils/commonMethod.js";
 import mongoose from "mongoose";
 
@@ -64,8 +65,37 @@ const getSummary = async (studentId) => {
           $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
         },
         totalMinutes: { $sum: "$activityMinutes" },
-        avgQuizScore: {
-          $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
+        quizScoreTotal: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              {
+                $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100],
+              },
+              0,
+            ],
+          },
+        },
+        quizCount: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
         },
       },
     },
@@ -75,7 +105,12 @@ const getSummary = async (studentId) => {
     totalActivities: summary?.totalActivities || 0,
     completedActivities: summary?.completedActivities || 0,
     totalHours: Number(((summary?.totalMinutes || 0) / 60 || 0).toFixed(2)),
-    avgQuizScore: Number((summary?.avgQuizScore || 0).toFixed(2)),
+    avgQuizScore: Number(
+      ((summary?.quizCount || 0) > 0
+        ? summary.quizScoreTotal / summary.quizCount
+        : 0
+      ).toFixed(2),
+    ),
     completionRate:
       summary?.totalActivities > 0
         ? Number(
@@ -87,7 +122,6 @@ const getSummary = async (studentId) => {
         : 0,
   };
 };
-
 const buildTimelineFilter = (period) => {
   const now = new Date();
   if (period === "past_1_week") {
@@ -270,8 +304,18 @@ export const getStudentCourseContent = catchAsync(async (req, res, next) => {
 
 export const saveStudentActivity = catchAsync(async (req, res, next) => {
   const student = await ensureStudent(req.user._id);
-  const { lessonId, activityType, subActivity, status, score, activityMinutes } =
-    req.body;
+  const {
+    lessonId,
+    activityType,
+    subActivity,
+    status,
+    score,
+    activityMinutes,
+    originalScore,
+    totalQuestions,
+    practiceOriginalScore,
+    quizOriginalScore,
+  } = req.body;
 
   if (!lessonId || !activityType) {
     return next(new AppError(400, "lessonId and activityType are required"));
@@ -279,6 +323,9 @@ export const saveStudentActivity = catchAsync(async (req, res, next) => {
 
   const lesson = await Lesson.findById(lessonId);
   if (!lesson) return next(new AppError(404, "Lesson not found"));
+
+  const parseScore = (val) =>
+    val !== undefined && val !== null && val !== "" ? Number(val) : null;
 
   const update = {
     status: status || "in_progress",
@@ -289,9 +336,15 @@ export const saveStudentActivity = catchAsync(async (req, res, next) => {
     lastUpdated: new Date(),
   };
 
-  if (score !== undefined) {
-    update.score = Number(score);
-  }
+  if (score !== undefined) update.score = parseScore(score);
+  if (originalScore !== undefined)
+    update.originalScore = parseScore(originalScore);
+  if (totalQuestions !== undefined)
+    update.totalQuestions = parseScore(totalQuestions);
+  if (practiceOriginalScore !== undefined)
+    update.practiceOriginalScore = parseScore(practiceOriginalScore);
+  if (quizOriginalScore !== undefined)
+    update.quizOriginalScore = parseScore(quizOriginalScore);
 
   if (update.status === "completed") {
     update.completedAt = new Date();
@@ -335,17 +388,55 @@ export const saveStudentActivity = catchAsync(async (req, res, next) => {
 
 export const syncStudentActivities = catchAsync(async (req, res, next) => {
   const student = await ensureStudent(req.user._id);
-  const activities = Array.isArray(req.body.activities)
-    ? req.body.activities
+  const activities = Array.isArray(req.body.progress_data)
+    ? req.body.progress_data
     : [];
+
+  console.log("Received activities for sync: ", activities);
+  const topLevelGrade = req.body.grade_name || null;
 
   if (!activities.length) {
     return next(new AppError(400, "activities array is required"));
   }
 
   let saved = 0;
+  let skipped = 0; // Tracks items ignored due to older timestamps
   const errors = [];
 
+  // --- Step 1: Pre-fetch Existing Data to Solve N+1 Problem ---
+  const validLessonIds = activities
+    .map((i) => i.lesson_id || i.lessonId || i.lesson)
+    .filter((id) => mongoose.Types.ObjectId.isValid(id));
+
+  const existingLessons = await Lesson.find({
+    _id: { $in: validLessonIds },
+  }).lean();
+  const lessonMap = new Map(existingLessons.map((l) => [String(l._id), l]));
+
+  const courseNames = [
+    ...new Set(activities.map((i) => i.course_name).filter(Boolean)),
+  ];
+  const existingCourses = await Course.find({
+    name: { $in: courseNames.map((n) => new RegExp(`^${n.trim()}$`, "i")) },
+  }).lean();
+  const courseMap = new Map(
+    existingCourses.map((c) => [c.name.toLowerCase().trim(), c]),
+  );
+
+  const existingProgress = await Progress.find({
+    student: student._id,
+    lesson: { $in: validLessonIds },
+  }).lean();
+  const progressMap = new Map(
+    existingProgress.map((p) => [
+      `${p.lesson}_${p.activityType}_${p.subActivity || null}`,
+      p,
+    ]),
+  );
+
+  const bulkOps = [];
+
+  // --- Step 2: Iterate and Build Bulk Operations ---
   for (let idx = 0; idx < activities.length; idx += 1) {
     const item = activities[idx] || {};
     const lessonId = item.lesson_id || item.lessonId || item.lesson;
@@ -354,87 +445,170 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
       .toLowerCase();
 
     if (!lessonId || !activityType) {
-      errors.push({ index: idx, reason: "lesson_id and activity_type are required" });
+      errors.push({
+        index: idx,
+        reason: "lesson_id and activity_type are required",
+      });
       continue;
     }
 
-    let lessonDoc = null;
-    if (mongoose.Types.ObjectId.isValid(lessonId)) {
-      lessonDoc = await Lesson.findById(lessonId);
+    let lessonDoc = mongoose.Types.ObjectId.isValid(lessonId)
+      ? lessonMap.get(String(lessonId))
+      : null;
+    let courseDoc = item.course_name
+      ? courseMap.get(String(item.course_name).toLowerCase().trim())
+      : null;
+
+    // Fallback: Create Course if perfectly missing
+    if (item.course_name && !courseDoc) {
+      const normalizedCourseName = String(item.course_name).trim();
+      courseDoc = await Course.create({
+        name: normalizedCourseName,
+        gradeLevels: [
+          normalizeGradeLevel(
+            item.grade_name || topLevelGrade || student.gradeLevel,
+          ),
+        ],
+      });
+      courseMap.set(normalizedCourseName.toLowerCase(), courseDoc);
     }
 
-    // fallback search using metadata when lesson id is not a valid ObjectId or not found
-    if (!lessonDoc && item.course_name) {
-      const courseDoc = await Course.findOne({
-        name: String(item.course_name).trim(),
-      });
-
-      if (courseDoc) {
-        const lessonQuery = {
-          course: courseDoc._id,
-          gradeLevel: normalizeGradeLevel(item.grade_name || student.gradeLevel),
-          strand: item.strand_name,
-          subStrand: item.sub_strand_name,
-        };
-        if (item.lesson_number) {
-          lessonQuery.lessonNumber = Number(item.lesson_number);
-        }
-        lessonDoc = await Lesson.findOne(lessonQuery);
+    // Fallback: Create/Find Lesson if missing
+    if (!lessonDoc && courseDoc) {
+      const lessonQuery = {
+        course: courseDoc._id,
+        gradeLevel: normalizeGradeLevel(
+          item.grade_name || topLevelGrade || student.gradeLevel,
+        ),
+        strand: item.strand_name,
+        subStrand: item.sub_strand_name,
+      };
+      if (item.lesson_number) {
+        const parsed = parseInt(
+          String(item.lesson_number).replace(/^\D+/g, ""),
+          10,
+        );
+        lessonQuery.lessonNumber = !isNaN(parsed) ? parsed : item.lesson_number;
       }
+
+      lessonDoc = await Lesson.findOne(lessonQuery);
+
+      if (!lessonDoc) {
+        const lessonTitle =
+          item.lesson_id && !mongoose.Types.ObjectId.isValid(item.lesson_id)
+            ? item.lesson_id
+            : item.lesson_title || "Untitled Lesson";
+
+        lessonDoc = await Lesson.create({
+          course: courseDoc._id,
+          gradeLevel: normalizeGradeLevel(
+            item.grade_name || topLevelGrade || student.gradeLevel,
+          ),
+          strand: item.strand_name || "Unknown Strand",
+          subStrand: item.sub_strand_name || "Unknown Sub-strand",
+          lessonNumber: lessonQuery.lessonNumber || 1,
+          title: lessonTitle,
+          status: "active",
+        });
+      }
+      lessonMap.set(String(lessonDoc._id), lessonDoc);
     }
 
     if (!lessonDoc) {
-      errors.push({ index: idx, lessonId, reason: "Lesson not found" });
+      errors.push({
+        index: idx,
+        lessonId,
+        reason: "Lesson not found in database. Matching failed.",
+      });
       continue;
+    }
+
+    if (!courseDoc) {
+      courseDoc = await Course.findById(lessonDoc.course).lean();
     }
 
     const status =
       Number(item.is_completed) === 1 || item.is_completed === true
         ? "completed"
         : "in_progress";
-    const lastUpdated = item.last_updated ? new Date(item.last_updated) : new Date();
+    const incomingLastUpdated = item.last_updated
+      ? new Date(item.last_updated)
+      : new Date();
+
+    // --- Step 3: Conflict Resolution (Last Write Wins) ---
+    const progressKey = `${lessonDoc._id}_${activityType}_${item.sub_activity || null}`;
+    const existingRecord = progressMap.get(progressKey);
+
+    // If existing record is newer than incoming, skip this update
+    if (
+      existingRecord &&
+      new Date(existingRecord.lastUpdated) > incomingLastUpdated
+    ) {
+      skipped += 1;
+      continue;
+    }
+
+    const parseScore = (val) =>
+      val !== undefined && val !== null && val !== "" ? Number(val) : null;
 
     const payload = {
       student: student._id,
-      course: lessonDoc.course,
-      courseName: item.course_name || undefined,
+      course: courseDoc?._id,
+      courseName: item.course_name || courseDoc?.name || undefined,
       lesson: lessonDoc._id,
       lessonId: lessonId,
       strandName: item.strand_name || lessonDoc.strand,
       subStrandName: item.sub_strand_name || lessonDoc.subStrand,
       lessonNumber: item.lesson_number || String(lessonDoc.lessonNumber),
-      gradeName: item.grade_name || student.gradeLevel,
+      gradeName: item.grade_name || lessonDoc.gradeLevel,
       activityType,
       subActivity: item.sub_activity || null,
       status,
-      score: item.score !== undefined ? Number(item.score) : null,
-      originalScore:
-        item.original_score !== undefined ? Number(item.original_score) : null,
-      totalQuestions:
-        item.total_questions !== undefined ? Number(item.total_questions) : null,
+      activityMinutes: Number(item.activity_minutes || 0),
+      score: parseScore(item.score),
+      originalScore: parseScore(item.original_score),
+      totalQuestions: parseScore(item.total_questions),
       syncStatus: item.sync_status !== undefined ? Number(item.sync_status) : 1,
-      lastUpdated,
-      performedAt: lastUpdated,
+      lastUpdated: incomingLastUpdated,
+      performedAt: incomingLastUpdated,
+      practiceOriginalScore: parseScore(item.practice_original_score),
+      quizOriginalScore: parseScore(item.quiz_original_score),
     };
 
     if (status === "completed") {
-      payload.completedAt = lastUpdated;
+      payload.completedAt = incomingLastUpdated;
     }
 
-    try {
-      await Progress.findOneAndUpdate(
-        {
+    bulkOps.push({
+      updateOne: {
+        filter: {
           student: student._id,
           lesson: lessonDoc._id,
           activityType: payload.activityType,
           subActivity: payload.subActivity,
         },
-        { $set: payload },
-        { upsert: true, new: true, runValidators: true },
-      );
-      saved += 1;
+        update: { $set: payload },
+        upsert: true,
+      },
+    });
+
+    // Update in-memory map to resolve conflicts within the same request payload
+    progressMap.set(progressKey, { lastUpdated: incomingLastUpdated });
+  }
+
+  // --- Step 4: Execute Bulk Write ---
+  if (bulkOps.length > 0) {
+    try {
+      await Progress.bulkWrite(bulkOps, { ordered: false });
+      saved = bulkOps.length;
     } catch (error) {
-      errors.push({ index: idx, lessonId, reason: error.message });
+      console.error("BulkWrite error : ", error);
+      if (error.writeErrors) {
+        error.writeErrors.forEach((err) => errors.push({ reason: err.errmsg }));
+        saved = bulkOps.length - error.writeErrors.length;
+      } else {
+        errors.push({ reason: error.message });
+      }
     }
   }
 
@@ -445,7 +619,43 @@ export const syncStudentActivities = catchAsync(async (req, res, next) => {
     data: {
       received: activities.length,
       saved,
+      skipped,
       errors,
+    },
+  });
+});
+
+export const getStudentActivities = catchAsync(async (req, res) => {
+  const student = await ensureStudent(req.user._id);
+  const { page, limit, skip } = parsePagination(req.query);
+
+  // Delta Sync Strategy
+  const filter = { student: student._id };
+  if (req.query.since) {
+    const sinceDate = new Date(req.query.since);
+    if (!isNaN(sinceDate.getTime())) {
+      filter.lastUpdated = { $gt: sinceDate };
+    }
+  }
+
+  const [items, total] = await Promise.all([
+    Progress.find(filter)
+      .populate("course", "name")
+      .populate("lesson", "title strand subStrand lessonNumber")
+      .sort({ lastUpdated: -1, performedAt: -1 }) // Sort by lastUpdated for proper sync ordering
+      .skip(skip)
+      //.limit(limit)
+      .lean(),
+    Progress.countDocuments(filter),
+  ]);
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Activities fetched successfully",
+    data: {
+      items,
+      meta: getPaginationMeta({ page, limit, total }),
     },
   });
 });
@@ -464,8 +674,37 @@ export const getStudentProgress = catchAsync(async (req, res) => {
           $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
         },
         totalMinutes: { $sum: "$activityMinutes" },
-        avgQuizScore: {
-          $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
+        quizScoreTotal: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              {
+                $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100],
+              },
+              0,
+            ],
+          },
+        },
+        quizCount: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
         },
       },
     },
@@ -485,7 +724,127 @@ export const getStudentProgress = catchAsync(async (req, res) => {
         subject: "$course.name",
         totalHours: { $round: [{ $divide: ["$totalMinutes", 60] }, 2] },
         activityCount: "$totalActivities",
-        avgQuizScore: { $round: ["$avgQuizScore", 2] },
+        avgQuizScore: {
+          $round: [
+            {
+              $cond: [
+                { $gt: ["$quizCount", 0] },
+                { $divide: ["$quizScoreTotal", "$quizCount"] },
+                0,
+              ],
+            },
+            2,
+          ],
+        },
+        completionRate: {
+          $cond: [
+            { $eq: ["$totalActivities", 0] },
+            0,
+            {
+              $round: [
+                {
+                  $multiply: [
+                    { $divide: ["$completedActivities", "$totalActivities"] },
+                    100,
+                  ],
+                },
+                2,
+              ],
+            },
+          ],
+        },
+      },
+    },
+    { $sort: { subject: 1 } },
+  ]);
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Progress fetched successfully",
+    data: {
+      summary,
+      subjectProgress,
+    },
+  });
+});
+
+export const getStudentProgresss = catchAsync(async (req, res) => {
+  const student = await ensureStudent(req.user._id);
+  const summary = await getSummary(student._id);
+
+  const subjectProgress = await Progress.aggregate([
+    { $match: { student: student._id } },
+    {
+      $group: {
+        _id: "$course",
+        totalActivities: { $sum: 1 },
+        completedActivities: {
+          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
+        totalMinutes: { $sum: "$activityMinutes" },
+        quizScoreTotal: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              {
+                $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100],
+              },
+              0,
+            ],
+          },
+        },
+        quizCount: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: "courses",
+        localField: "_id",
+        foreignField: "_id",
+        as: "course",
+      },
+    },
+    { $unwind: "$course" },
+    {
+      $project: {
+        _id: 0,
+        courseId: "$course._id",
+        subject: "$course.name",
+        totalHours: { $round: [{ $divide: ["$totalMinutes", 60] }, 2] },
+        activityCount: "$totalActivities",
+        avgQuizScore: {
+          $round: [
+            {
+              $cond: [
+                { $gt: ["$quizCount", 0] },
+                { $divide: ["$quizScoreTotal", "$quizCount"] },
+                0,
+              ],
+            },
+            2,
+          ],
+        },
         completionRate: {
           $cond: [
             { $eq: ["$totalActivities", 0] },
@@ -549,11 +908,24 @@ export const getStudentSubjectProgress = catchAsync(async (req, res, next) => {
     ).length,
     avgQuizScore:
       activities
-        .filter((item) => item.activityType === "quiz" && item.score !== null)
-        .reduce((acc, item) => acc + item.score, 0) /
+        .filter(
+          (item) =>
+            item.activityType === "quiz" &&
+            item.score !== null &&
+            item.totalQuestions &&
+            item.totalQuestions > 0,
+        )
+        .reduce(
+          (acc, item) => acc + (item.score / item.totalQuestions) * 100,
+          0,
+        ) /
       Math.max(
         activities.filter(
-          (item) => item.activityType === "quiz" && item.score !== null,
+          (item) =>
+            item.activityType === "quiz" &&
+            item.score !== null &&
+            item.totalQuestions &&
+            item.totalQuestions > 0,
         ).length,
         1,
       ),
@@ -576,6 +948,7 @@ export const getStudentSubjectProgress = catchAsync(async (req, res, next) => {
 
 export const getStudentProfile = catchAsync(async (req, res) => {
   const student = await ensureStudent(req.user._id);
+  const summary = await getSummary(student._id);
 
   sendResponse(res, {
     statusCode: 200,
@@ -591,6 +964,8 @@ export const getStudentProfile = catchAsync(async (req, res) => {
         school: student.school,
         picture: student.picture,
         file: student.file,
+        averageScore: summary.avgQuizScore,
+        totalNumberOfMinutes: summary.totalHours * 60,
       },
     },
   });

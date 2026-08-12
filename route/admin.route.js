@@ -2,6 +2,9 @@
 import {
   addCourse,
   addLesson,
+  addBulkSchools,
+  addBulkStudents,
+  addBulkTeachers,
   addNewStudent,
   addNewTeacher,
   addSchool,
@@ -43,6 +46,7 @@ router.post(
   upload.fields([{ name: "picture" }, { name: "file" }]),
   addNewStudent,
 );
+router.post("/students/bulk", addBulkStudents);
 router.get("/students", getStudents);
 router.get("/students/:studentId", getStudentById);
 router.patch(
@@ -57,6 +61,7 @@ router.post(
   upload.fields([{ name: "picture" }, { name: "file" }]),
   addNewTeacher,
 );
+router.post("/teachers/bulk", addBulkTeachers);
 router.get("/teachers", getTeachers);
 router.get("/teachers/:teacherId", getTeacherById);
 router.patch(
@@ -67,6 +72,7 @@ router.patch(
 router.delete("/teachers/:teacherId", deleteTeacher);
 
 router.post("/schools", addSchool);
+router.post("/schools/bulk", addBulkSchools);
 router.get("/schools", getSchools);
 router.patch("/schools/:schoolId", updateSchool);
 router.delete("/schools/:schoolId", deleteSchool);
