@@ -1247,6 +1247,11 @@ export const getTeacherStudents = catchAsync(async (req, res, next) => {
   const filter = { school: teacher.school?._id };
   const gradeLevel = req.query.gradeLevel || "ALL";
 
+  // Sorting parameters
+  const sortBy = req.query.sortBy || "createdAt";
+  const sortOrder = req.query.sortOrder || "desc";
+  const sortDirection = sortOrder === "asc" ? 1 : -1;
+
   if (req.query.status) filter.status = req.query.status;
   const normalizedGradeLevel = getGradeLevelFilter(gradeLevel);
   if (normalizedGradeLevel) filter.gradeLevel = normalizedGradeLevel;
@@ -1262,16 +1267,69 @@ export const getTeacherStudents = catchAsync(async (req, res, next) => {
       filter.$or.push({ user: { $in: users.map((u) => u._id) } });
   }
 
-  const [items, total] = await Promise.all([
-    Student.find(filter)
-      .populate("school", "name schoolCode")
-      .populate("user", "userId lastLoginAt")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    Student.countDocuments(filter),
-  ]);
+  // Build sort object for MongoDB
+  let sortObject = {};
+  let needsClientSideSorting = false;
+
+  switch (sortBy) {
+    case "studentName":
+      sortObject = { name: sortDirection };
+      break;
+    case "userId":
+      sortObject = { "user.userId": sortDirection };
+      break;
+    case "gradeLevel":
+      sortObject = { gradeLevel: sortDirection };
+      break;
+    case "status":
+      sortObject = { "user.lastLoginAt": sortDirection };
+      break;
+    case "lastLoginAt":
+      sortObject = { "user.lastLoginAt": sortDirection };
+      break;
+    case "avgQuizScore":
+      // avgQuizScore is calculated in JavaScript, so we need client-side sorting
+      needsClientSideSorting = true;
+      sortObject = { createdAt: -1 }; // Default fallback
+      break;
+    case "createdAt":
+    default:
+      sortObject = { createdAt: sortDirection };
+      break;
+  }
+
+  // Fetch students with pagination
+  let items = [];
+  let total = 0;
+
+  if (needsClientSideSorting) {
+    // For avgQuizScore, fetch all items for current page first, then sort in JS
+    const [fetchedItems, totalCount] = await Promise.all([
+      Student.find(filter)
+        .populate("school", "name schoolCode")
+        .populate("user", "userId lastLoginAt")
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Student.countDocuments(filter),
+    ]);
+    items = fetchedItems;
+    total = totalCount;
+  } else {
+    // Normal sorting in MongoDB
+    const [fetchedItems, totalCount] = await Promise.all([
+      Student.find(filter)
+        .populate("school", "name schoolCode")
+        .populate("user", "userId lastLoginAt")
+        .sort(sortObject)
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Student.countDocuments(filter),
+    ]);
+    items = fetchedItems;
+    total = totalCount;
+  }
 
   // Get all progress records for these students to calculate avgQuizScore
   const studentIds = items.map((item) => item._id);
@@ -1305,22 +1363,61 @@ export const getTeacherStudents = catchAsync(async (req, res, next) => {
     studentAvgQuizScores.set(studentId, Number(avgScore.toFixed(1)));
   }
 
+  // Map items with avgQuizScore
+  let mappedItems = items.map((item) => ({
+    _id: item._id,
+    studentName: item.name,
+    userId: item.user?.userId,
+    schoolName: item.school?.name,
+    gradeLevel: item.gradeLevel,
+    status: getStudentLoginStatus(item.user?.lastLoginAt),
+    lastLoginAt: item.user?.lastLoginAt || null,
+    avgQuizScore: studentAvgQuizScores.get(item._id.toString()) || 0,
+  }));
+
+  // If sorting by avgQuizScore, do client-side sorting
+  if (needsClientSideSorting) {
+    mappedItems.sort((a, b) => {
+      const aScore = a.avgQuizScore || 0;
+      const bScore = b.avgQuizScore || 0;
+      return sortDirection === 1 ? aScore - bScore : bScore - aScore;
+    });
+  }
+
+  // Handle status sorting if needed (fallback for when MongoDB sort didn't work as expected)
+  if (sortBy === "status" && !needsClientSideSorting) {
+    const statusOrder = {
+      active: 0,
+      inactive: 1,
+    };
+    if (sortDirection === 1) {
+      mappedItems.sort((a, b) => statusOrder[a.status] - statusOrder[b.status]);
+    } else {
+      mappedItems.sort((a, b) => statusOrder[b.status] - statusOrder[a.status]);
+    }
+  }
+
   sendResponse(res, {
     statusCode: 200,
     success: true,
     message: "Students fetched successfully",
     data: {
-      items: items.map((item) => ({
-        _id: item._id,
-        studentName: item.name,
-        userId: item.user?.userId,
-        schoolName: item.school?.name,
-        gradeLevel: item.gradeLevel,
-        status: getStudentLoginStatus(item.user?.lastLoginAt),
-        lastLoginAt: item.user?.lastLoginAt || null,
-        avgQuizScore: studentAvgQuizScores.get(item._id.toString()) || 0,
-      })),
+      items: mappedItems,
       meta: getPaginationMeta({ page, limit, total }),
+      // Include available sort options for frontend
+      sortOptions: {
+        fields: [
+          { value: "studentName", label: "Name" },
+          { value: "userId", label: "User ID" },
+          { value: "gradeLevel", label: "Grade Level" },
+          { value: "status", label: "Status" },
+          { value: "lastLoginAt", label: "Last Login" },
+          { value: "avgQuizScore", label: "Average Quiz Score" },
+          { value: "createdAt", label: "Created Date" },
+        ],
+        default: "createdAt",
+        defaultOrder: "desc",
+      },
     },
   });
 });
