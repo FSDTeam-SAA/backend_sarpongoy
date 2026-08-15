@@ -1,4 +1,4 @@
-import AppError from "../errors/AppError.js";
+﻿import AppError from "../errors/AppError.js";
 import { Course } from "../models/course.model.js";
 import { Progress } from "../models/progress.model.js";
 import { Student } from "../models/student.model.js";
@@ -230,7 +230,7 @@ const getRangeDays = (range) => {
   if (!range?.start || !range?.end) return null;
   const diff = Math.ceil(
     (new Date(range.end).getTime() - new Date(range.start).getTime()) /
-    DAY_IN_MS,
+      DAY_IN_MS,
   );
   return Math.max(diff + 1, 1);
 };
@@ -692,9 +692,9 @@ const getSubjectPerformanceSeries = async ({
 
   const rangeDays = range
     ? Math.max(
-      Math.ceil((range.end.getTime() - range.start.getTime()) / DAY_IN_MS),
-      1,
-    )
+        Math.ceil((range.end.getTime() - range.start.getTime()) / DAY_IN_MS),
+        1,
+      )
     : 7;
 
   const raw = await Progress.aggregate([
@@ -1155,7 +1155,6 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
 
   // ========== COUNTERS (USE OVERALL DATA, NO FILTERS) ==========
   const totalStudentsCount = allStudents.length;
-  const totalSubjectsCount = teacher.courses?.length || 0;
 
   // Login counts based on ALL students (no gradeLevel filter)
   const loginCounts = buildStudentStatusCounts(allStudents);
@@ -1226,7 +1225,7 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
         totalStudents: totalStudentsCount,
         activeStudents: loginCounts.active,
         inactiveStudents: loginCounts.inactive,
-        totalSubjects: totalSubjectsCount,
+        totalSubjects: teacher.courses?.length || subjectMetrics.length || 0,
         lessonCompleted: totalCompleted,
         quizCompleted: totalQuizCompleted,
       },
@@ -1438,7 +1437,6 @@ export const getTeacherStudentById = catchAsync(async (req, res, next) => {
 
   const progressSheet = await getStudentProgressSummary({
     studentId: student._id,
-    gradeLevel: student.gradeLevel,
   });
 
   sendResponse(res, {
@@ -1501,8 +1499,7 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
   if (!student) return next(new AppError(404, "Student not found"));
 
   const recentRange = getDateRangeFromPeriod(timePeriod);
-  const effectiveGradeLevel =
-    getOverviewGradeLevel(gradeLevel) || student.gradeLevel;
+  const effectiveGradeLevel = getOverviewGradeLevel(gradeLevel);
   const matchBase = buildStudentProgressMatch({
     studentId: student._id,
     courseIds: selectedCourseIds,
