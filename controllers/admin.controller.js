@@ -204,6 +204,201 @@ const getStudentProgressSummary = async (studentId) => {
   };
 };
 
+const normalizeText = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+
+const getPastYearRange = () => {
+  const now = new Date();
+  const start = new Date(now);
+  start.setFullYear(now.getFullYear() - 1);
+  start.setDate(1);
+  start.setHours(0, 0, 0, 0);
+  return { start, end: now };
+};
+
+const buildMonthlyBuckets = ({ start, end }) => {
+  const buckets = [];
+  const cursor = new Date(start);
+  cursor.setDate(1);
+  while (cursor <= end) {
+    buckets.push({
+      key: `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`,
+      label: cursor.toLocaleDateString("en-US", { month: "short" }),
+    });
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return buckets;
+};
+
+const getTeacherCompletionTrend = async ({ studentIds, courseIds, range }) => {
+  const buckets = buildMonthlyBuckets(range);
+
+  if (!studentIds.length) {
+    return buckets.map((bucket) => ({
+      month: bucket.label,
+      completed: 0,
+      avgQuizScore: 0,
+    }));
+  }
+
+  const match = {
+    student: { $in: studentIds },
+    lastUpdated: { $gte: range.start, $lte: range.end },
+  };
+  if (courseIds.length) match.course = { $in: courseIds };
+
+  const raw = await Progress.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: { $dateToString: { format: "%Y-%m", date: "$lastUpdated" } },
+        completed: {
+          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
+        avgQuizScore: {
+          $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
+        },
+      },
+    },
+  ]);
+
+  const byKey = new Map(raw.map((item) => [item._id, item]));
+
+  return buckets.map((bucket) => {
+    const found = byKey.get(bucket.key);
+    return {
+      month: bucket.label,
+      completed: found?.completed || 0,
+      avgQuizScore: Number((found?.avgQuizScore || 0).toFixed(1)),
+    };
+  });
+};
+
+const getTeacherCoursePerformance = async ({ studentIds, courseIds }) => {
+  if (!studentIds.length || !courseIds.length) return [];
+
+  return Progress.aggregate([
+    { $match: { student: { $in: studentIds }, course: { $in: courseIds } } },
+    {
+      $group: {
+        _id: "$course",
+        total: { $sum: 1 },
+        completed: {
+          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: "courses",
+        localField: "_id",
+        foreignField: "_id",
+        as: "course",
+      },
+    },
+    { $unwind: "$course" },
+    {
+      $project: {
+        _id: 0,
+        courseId: "$course._id",
+        subject: "$course.name",
+        completionRate: {
+          $cond: [
+            { $eq: ["$total", 0] },
+            0,
+            {
+              $round: [
+                { $multiply: [{ $divide: ["$completed", "$total"] }, 100] },
+                0,
+              ],
+            },
+          ],
+        },
+      },
+    },
+  ]);
+};
+
+const getTeacherRecentWork = async ({ studentIds, courseIds }) => {
+  if (!studentIds.length || !courseIds.length) return [];
+
+  const [practice, quiz, courses] = await Promise.all([
+    Progress.aggregate([
+      {
+        $match: {
+          student: { $in: studentIds },
+          course: { $in: courseIds },
+          activityType: "independent",
+        },
+      },
+      {
+        $group: {
+          _id: "$course",
+          completed: {
+            $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+          },
+          total: { $sum: 1 },
+        },
+      },
+    ]),
+    Progress.aggregate([
+      {
+        $match: {
+          student: { $in: studentIds },
+          course: { $in: courseIds },
+          activityType: "quiz",
+        },
+      },
+      {
+        $group: {
+          _id: "$course",
+          completed: {
+            $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+          },
+          total: { $sum: 1 },
+          lowestScorePct: {
+            $min: {
+              $cond: [
+                {
+                  $and: [
+                    { $ne: ["$score", null] },
+                    { $gt: ["$totalQuestions", 0] },
+                  ],
+                },
+                { $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100] },
+                null,
+              ],
+            },
+          },
+        },
+      },
+    ]),
+    Course.find({ _id: { $in: courseIds } })
+      .select("name")
+      .lean(),
+  ]);
+
+  const practiceMap = new Map(practice.map((item) => [String(item._id), item]));
+  const quizMap = new Map(quiz.map((item) => [String(item._id), item]));
+
+  return courses.map((course) => {
+    const p = practiceMap.get(String(course._id));
+    const q = quizMap.get(String(course._id));
+    return {
+      subject: course.name,
+      practiceCompleted: p?.completed || 0,
+      practiceTotal: p?.total || 0,
+      quizCompleted: q?.completed || 0,
+      quizTotal: q?.total || 0,
+      lowestQuizScore:
+        q?.lowestScorePct != null ? Math.round(q.lowestScorePct) : null,
+    };
+  });
+};
+
 const ensureSchool = async ({ schoolId, schoolName }) => {
   if (schoolId && mongoose.Types.ObjectId.isValid(schoolId)) {
     return School.findById(schoolId);
@@ -1016,6 +1211,53 @@ export const getTeacherById = catchAsync(async (req, res, next) => {
   });
 });
 
+export const getTeacherOverview = catchAsync(async (req, res, next) => {
+  const teacher = await Teacher.findById(req.params.teacherId)
+    .populate("school", "name schoolCode")
+    .populate("courses", "name")
+    .lean();
+
+  if (!teacher) return next(new AppError(404, "Teacher not found"));
+
+  const courses = teacher.courses || [];
+  const courseIds = courses.map((course) => course._id);
+
+  const subjectQuery = req.query.subject ? normalizeText(req.query.subject) : null;
+  const matchedCourse = subjectQuery
+    ? courses.find((course) => normalizeText(course.name) === subjectQuery)
+    : null;
+  const trendCourseIds = matchedCourse ? [matchedCourse._id] : courseIds;
+
+  const students = await Student.find({
+    school: teacher.school?._id,
+    gradeLevel: teacher.gradeLevel,
+  })
+    .select("_id")
+    .lean();
+  const studentIds = students.map((student) => student._id);
+
+  const range = getPastYearRange();
+
+  const [monthlyTrend, performanceRange, recentWork] = await Promise.all([
+    getTeacherCompletionTrend({ studentIds, courseIds: trendCourseIds, range }),
+    getTeacherCoursePerformance({ studentIds, courseIds }),
+    getTeacherRecentWork({ studentIds, courseIds }),
+  ]);
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Teacher overview fetched successfully",
+    data: {
+      courses: courses.map((course) => ({ _id: course._id, name: course.name })),
+      totalStudents: studentIds.length,
+      monthlyTrend,
+      performanceRange,
+      recentWork,
+    },
+  });
+});
+
 export const updateTeacher = catchAsync(async (req, res, next) => {
   const teacher = await Teacher.findById(req.params.teacherId);
   if (!teacher) return next(new AppError(404, "Teacher not found"));
@@ -1061,14 +1303,27 @@ export const updateTeacher = catchAsync(async (req, res, next) => {
     user.school = school._id;
   }
 
-  if (Array.isArray(req.body.courseIds)) {
-    const validCount = await Course.countDocuments({
-      _id: { $in: req.body.courseIds },
-    });
-    if (validCount !== req.body.courseIds.length) {
+  const hasCourseIdsField =
+    Object.prototype.hasOwnProperty.call(req.body, "courseIds") ||
+    Object.prototype.hasOwnProperty.call(req.body, "courseIds[]");
+
+  if (hasCourseIdsField) {
+    const courseIds = parseCourseIds(req.body);
+    const invalidCourseIds = courseIds.filter(
+      (courseId) => !mongoose.Types.ObjectId.isValid(courseId),
+    );
+    if (invalidCourseIds.length > 0) {
       return next(new AppError(400, "Some course IDs are invalid"));
     }
-    teacher.courses = req.body.courseIds;
+
+    const validCount = await Course.countDocuments({
+      _id: { $in: courseIds },
+    });
+    if (validCount !== courseIds.length) {
+      return next(new AppError(400, "Some course IDs are invalid"));
+    }
+
+    teacher.courses = courseIds;
   }
 
   if (req.files?.picture?.[0]) {

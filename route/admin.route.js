@@ -23,6 +23,7 @@ import {
   getStudents,
   getSupportTickets,
   getTeacherById,
+  getTeacherOverview,
   getTeachers,
   resolveSupportTicket,
   updateCourse,
@@ -64,6 +65,7 @@ router.post(
 router.post("/teachers/bulk", addBulkTeachers);
 router.get("/teachers", getTeachers);
 router.get("/teachers/:teacherId", getTeacherById);
+router.get("/teachers/:teacherId/overview", getTeacherOverview);
 router.patch(
   "/teachers/:teacherId",
   upload.fields([{ name: "picture" }, { name: "file" }]),
