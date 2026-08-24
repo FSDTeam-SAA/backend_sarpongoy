@@ -415,6 +415,40 @@ const ensureGrade = (gradeLevel) => {
   return normalized;
 };
 
+const parseBulkRecordIds = (value, recordLabel) => {
+  if (!Array.isArray(value)) {
+    throw new AppError(400, `${recordLabel} IDs must be an array`);
+  }
+
+  const ids = [...new Set(value.map((item) => String(item).trim()).filter(Boolean))];
+  if (ids.length === 0) {
+    throw new AppError(400, `Select at least one ${recordLabel.toLowerCase()}`);
+  }
+  if (ids.length > 500) {
+    throw new AppError(400, `A maximum of 500 ${recordLabel.toLowerCase()}s can be updated`);
+  }
+  if (ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) {
+    throw new AppError(400, `Some ${recordLabel.toLowerCase()} IDs are invalid`);
+  }
+
+  return ids;
+};
+
+const updatePeopleGradeLevel = async ({ Model, ids, gradeLevel, recordLabel }) => {
+  const records = await Model.find({ _id: { $in: ids } }).select("_id user").lean();
+  if (records.length !== ids.length) {
+    throw new AppError(404, `Some selected ${recordLabel.toLowerCase()}s were not found`);
+  }
+
+  const userIds = records.map((record) => record.user).filter(Boolean);
+  await Promise.all([
+    Model.updateMany({ _id: { $in: ids } }, { $set: { gradeLevel } }),
+    User.updateMany({ _id: { $in: userIds } }, { $set: { gradeLevel } }),
+  ]);
+
+  return records.length;
+};
+
 const parseArrayField = (value) => {
   if (value === undefined || value === null || value === "") return [];
   if (Array.isArray(value)) return value;
@@ -944,6 +978,51 @@ export const getStudents = catchAsync(async (req, res) => {
   });
 });
 
+export const getStudentsExport = catchAsync(async (req, res) => {
+  const filter = {};
+
+  if (req.query.status) filter.status = req.query.status;
+  if (req.query.schoolId) filter.school = req.query.schoolId;
+  if (req.query.gradeLevel)
+    filter.gradeLevel = normalizeGradeLevel(req.query.gradeLevel);
+
+  if (req.query.search) {
+    const regex = buildSearchRegex(req.query.search);
+    const [users, schools] = await Promise.all([
+      User.find(
+        { role: "student", $or: [{ name: regex }, { userId: regex }] },
+        { _id: 1 },
+      ),
+      School.find({ name: regex }, { _id: 1 }),
+    ]);
+
+    filter.$or = [{ name: regex }];
+    if (users.length)
+      filter.$or.push({ user: { $in: users.map((user) => user._id) } });
+    if (schools.length)
+      filter.$or.push({ school: { $in: schools.map((school) => school._id) } });
+  }
+
+  const students = await Student.find(filter)
+    .populate("school", "name")
+    .populate("user", "userId mac_id")
+    .sort({ createdAt: -1 })
+    .lean();
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Student export data fetched successfully",
+    data: students.map((student) => ({
+      serialNumber: student.user?.mac_id || "",
+      schoolName: student.school?.name || "",
+      studentName: student.name,
+      userId: student.user?.userId || "",
+      gradeLevel: student.gradeLevel,
+    })),
+  });
+});
+
 export const getStudentById = catchAsync(async (req, res, next) => {
   const student = await Student.findById(req.params.studentId)
     .populate("school", "name schoolCode")
@@ -1064,6 +1143,24 @@ export const updateStudent = catchAsync(async (req, res, next) => {
   });
 });
 
+export const updateStudentsGradeLevel = catchAsync(async (req, res) => {
+  const studentIds = parseBulkRecordIds(req.body.studentIds, "Student");
+  const gradeLevel = ensureGrade(req.body.gradeLevel);
+  const updatedCount = await updatePeopleGradeLevel({
+    Model: Student,
+    ids: studentIds,
+    gradeLevel,
+    recordLabel: "Student",
+  });
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Selected students' grade level updated successfully",
+    data: { updatedCount, gradeLevel },
+  });
+});
+
 export const deleteStudent = catchAsync(async (req, res, next) => {
   const student = await Student.findById(req.params.studentId);
   if (!student) return next(new AppError(404, "Student not found"));
@@ -1181,6 +1278,51 @@ export const getTeachers = catchAsync(async (req, res) => {
       })),
       meta: getPaginationMeta({ page, limit, total }),
     },
+  });
+});
+
+export const getTeachersExport = catchAsync(async (req, res) => {
+  const filter = {};
+
+  if (req.query.status) filter.status = req.query.status;
+  if (req.query.schoolId) filter.school = req.query.schoolId;
+  if (req.query.gradeLevel)
+    filter.gradeLevel = normalizeGradeLevel(req.query.gradeLevel);
+
+  if (req.query.search) {
+    const regex = buildSearchRegex(req.query.search);
+    const [users, schools] = await Promise.all([
+      User.find(
+        { role: "teacher", $or: [{ name: regex }, { userId: regex }] },
+        { _id: 1 },
+      ),
+      School.find({ name: regex }, { _id: 1 }),
+    ]);
+
+    filter.$or = [{ name: regex }];
+    if (users.length)
+      filter.$or.push({ user: { $in: users.map((user) => user._id) } });
+    if (schools.length)
+      filter.$or.push({ school: { $in: schools.map((school) => school._id) } });
+  }
+
+  const teachers = await Teacher.find(filter)
+    .populate("school", "name")
+    .populate("user", "userId mac_id")
+    .sort({ createdAt: -1 })
+    .lean();
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Teacher export data fetched successfully",
+    data: teachers.map((teacher) => ({
+      serialNumber: teacher.user?.mac_id || "",
+      schoolName: teacher.school?.name || "",
+      teacherName: teacher.name,
+      userId: teacher.user?.userId || "",
+      gradeLevel: teacher.gradeLevel,
+    })),
   });
 });
 
@@ -1359,6 +1501,24 @@ export const updateTeacher = catchAsync(async (req, res, next) => {
   });
 });
 
+export const updateTeachersGradeLevel = catchAsync(async (req, res) => {
+  const teacherIds = parseBulkRecordIds(req.body.teacherIds, "Teacher");
+  const gradeLevel = ensureGrade(req.body.gradeLevel);
+  const updatedCount = await updatePeopleGradeLevel({
+    Model: Teacher,
+    ids: teacherIds,
+    gradeLevel,
+    recordLabel: "Teacher",
+  });
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Selected teachers' grade level updated successfully",
+    data: { updatedCount, gradeLevel },
+  });
+});
+
 export const deleteTeacher = catchAsync(async (req, res, next) => {
   const teacher = await Teacher.findById(req.params.teacherId);
   if (!teacher) return next(new AppError(404, "Teacher not found"));
@@ -1398,6 +1558,30 @@ export const getSchools = catchAsync(async (req, res) => {
       items,
       meta: getPaginationMeta({ page, limit, total }),
     },
+  });
+});
+
+export const getSchoolsExport = catchAsync(async (req, res) => {
+  const filter = {};
+
+  if (req.query.status) filter.status = req.query.status;
+  if (req.query.search) {
+    const regex = buildSearchRegex(req.query.search);
+    filter.$or = [{ name: regex }, { schoolCode: regex }];
+  }
+
+  const schools = await School.find(filter).sort({ createdAt: -1 }).lean();
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "School export data fetched successfully",
+    data: schools.map((school, index) => ({
+      serialNumber: index + 1,
+      schoolName: school.name,
+      schoolCode: school.schoolCode || school.schooleCode || "",
+      gradeLevel: school.gradeLevels?.join(", ") || "",
+    })),
   });
 });
 
@@ -1460,6 +1644,28 @@ export const updateSchool = catchAsync(async (req, res, next) => {
     success: true,
     message: "School updated successfully",
     data: school,
+  });
+});
+
+export const updateSchoolsGradeLevel = catchAsync(async (req, res) => {
+  const schoolIds = parseBulkRecordIds(req.body.schoolIds, "School");
+  const gradeLevel = ensureGrade(req.body.gradeLevel);
+  const existingCount = await School.countDocuments({ _id: { $in: schoolIds } });
+
+  if (existingCount !== schoolIds.length) {
+    throw new AppError(404, "Some selected schools were not found");
+  }
+
+  await School.updateMany(
+    { _id: { $in: schoolIds } },
+    { $set: { gradeLevels: [gradeLevel] } },
+  );
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Selected schools' grade level updated successfully",
+    data: { updatedCount: existingCount, gradeLevel },
   });
 });
 

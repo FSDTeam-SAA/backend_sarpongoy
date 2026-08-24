@@ -18,20 +18,26 @@ import {
   getCourses,
   getMyProfile,
   getSchools,
+  getSchoolsExport,
   getLessons,
   getStudentById,
   getStudents,
+  getStudentsExport,
   getSupportTickets,
   getTeacherById,
   getTeacherOverview,
   getTeachers,
+  getTeachersExport,
   resolveSupportTicket,
   updateCourse,
   updateLesson,
   updateMyProfile,
   updateSchool,
+  updateSchoolsGradeLevel,
   updateStudent,
+  updateStudentsGradeLevel,
   updateTeacher,
+  updateTeachersGradeLevel,
 } from "../controllers/admin.controller.js";
 import { protect, restrictTo } from "../middleware/auth.middleware.js";
 import upload from "../middleware/multer.middleware.js";
@@ -48,7 +54,9 @@ router.post(
   addNewStudent,
 );
 router.post("/students/bulk", addBulkStudents);
+router.patch("/students/bulk/grade-level", updateStudentsGradeLevel);
 router.get("/students", getStudents);
+router.get("/students/export", getStudentsExport);
 router.get("/students/:studentId", getStudentById);
 router.patch(
   "/students/:studentId",
@@ -63,7 +71,9 @@ router.post(
   addNewTeacher,
 );
 router.post("/teachers/bulk", addBulkTeachers);
+router.patch("/teachers/bulk/grade-level", updateTeachersGradeLevel);
 router.get("/teachers", getTeachers);
+router.get("/teachers/export", getTeachersExport);
 router.get("/teachers/:teacherId", getTeacherById);
 router.get("/teachers/:teacherId/overview", getTeacherOverview);
 router.patch(
@@ -75,7 +85,9 @@ router.delete("/teachers/:teacherId", deleteTeacher);
 
 router.post("/schools", addSchool);
 router.post("/schools/bulk", addBulkSchools);
+router.patch("/schools/bulk/grade-level", updateSchoolsGradeLevel);
 router.get("/schools", getSchools);
+router.get("/schools/export", getSchoolsExport);
 router.patch("/schools/:schoolId", updateSchool);
 router.delete("/schools/:schoolId", deleteSchool);
 
