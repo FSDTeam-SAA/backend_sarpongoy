@@ -103,8 +103,35 @@ const getStudentProgressSummary = async (studentId) => {
           $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
         },
         totalMinutes: { $sum: "$activityMinutes" },
-        avgQuizScore: {
-          $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
+        quizScoreTotal: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              { $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100] },
+              0,
+            ],
+          },
+        },
+        quizCount: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
         },
       },
     },
@@ -118,6 +145,37 @@ const getStudentProgressSummary = async (studentId) => {
         total: { $sum: 1 },
         completed: {
           $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
+        totalMinutes: { $sum: "$activityMinutes" },
+        quizScoreTotal: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              { $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100] },
+              0,
+            ],
+          },
+        },
+        quizCount: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
         },
       },
     },
@@ -134,6 +192,23 @@ const getStudentProgressSummary = async (studentId) => {
       $project: {
         _id: 0,
         subject: "$course.name",
+        totalActivities: "$total",
+        completedActivities: "$completed",
+        totalHours: {
+          $round: [{ $divide: ["$totalMinutes", 60] }, 2],
+        },
+        avgQuizScore: {
+          $round: [
+            {
+              $cond: [
+                { $gt: ["$quizCount", 0] },
+                { $divide: ["$quizScoreTotal", "$quizCount"] },
+                0,
+              ],
+            },
+            2,
+          ],
+        },
         completionRate: {
           $cond: [
             { $eq: ["$total", 0] },
@@ -154,7 +229,7 @@ const getStudentProgressSummary = async (studentId) => {
     .populate("course", "name")
     .populate("lesson", "title strand subStrand")
     .sort({ updatedAt: -1 })
-    .limit(8)
+    .limit(40)
     .lean();
 
   const lowestQuizScores = await Progress.find({
@@ -172,7 +247,12 @@ const getStudentProgressSummary = async (studentId) => {
       totalActivities: summary?.totalActivities || 0,
       completedActivities: summary?.completedActivities || 0,
       totalHours: Number(((summary?.totalMinutes || 0) / 60 || 0).toFixed(2)),
-      avgQuizScore: Number((summary?.avgQuizScore || 0).toFixed(2)),
+      avgQuizScore: Number(
+        ((summary?.quizCount || 0) > 0
+          ? summary.quizScoreTotal / summary.quizCount
+          : 0
+        ).toFixed(2),
+      ),
       completionRate:
         summary?.totalActivities > 0
           ? Number(
