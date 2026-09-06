@@ -15,6 +15,10 @@ import catchAsync from "../utils/catchAsync.js";
 import sendResponse from "../utils/sendResponse.js";
 import { uploadOnCloudinary } from "../utils/commonMethod.js";
 import mongoose from "mongoose";
+import {
+  filterCoursesBySubject,
+  getStudentOverviewData,
+} from "../services/studentOverview.service.js";
 
 const buildSearchRegex = (value) =>
   new RegExp(
@@ -103,8 +107,35 @@ const getStudentProgressSummary = async (studentId) => {
           $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
         },
         totalMinutes: { $sum: "$activityMinutes" },
-        avgQuizScore: {
-          $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
+        quizScoreTotal: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              { $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100] },
+              0,
+            ],
+          },
+        },
+        quizCount: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
         },
       },
     },
@@ -118,6 +149,37 @@ const getStudentProgressSummary = async (studentId) => {
         total: { $sum: 1 },
         completed: {
           $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
+        totalMinutes: { $sum: "$activityMinutes" },
+        quizScoreTotal: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              { $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100] },
+              0,
+            ],
+          },
+        },
+        quizCount: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$activityType", "quiz"] },
+                  { $ne: ["$score", null] },
+                  { $gt: ["$totalQuestions", 0] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
         },
       },
     },
@@ -134,6 +196,23 @@ const getStudentProgressSummary = async (studentId) => {
       $project: {
         _id: 0,
         subject: "$course.name",
+        totalActivities: "$total",
+        completedActivities: "$completed",
+        totalHours: {
+          $round: [{ $divide: ["$totalMinutes", 60] }, 2],
+        },
+        avgQuizScore: {
+          $round: [
+            {
+              $cond: [
+                { $gt: ["$quizCount", 0] },
+                { $divide: ["$quizScoreTotal", "$quizCount"] },
+                0,
+              ],
+            },
+            2,
+          ],
+        },
         completionRate: {
           $cond: [
             { $eq: ["$total", 0] },
@@ -154,7 +233,7 @@ const getStudentProgressSummary = async (studentId) => {
     .populate("course", "name")
     .populate("lesson", "title strand subStrand")
     .sort({ updatedAt: -1 })
-    .limit(8)
+    .limit(40)
     .lean();
 
   const lowestQuizScores = await Progress.find({
@@ -172,15 +251,20 @@ const getStudentProgressSummary = async (studentId) => {
       totalActivities: summary?.totalActivities || 0,
       completedActivities: summary?.completedActivities || 0,
       totalHours: Number(((summary?.totalMinutes || 0) / 60 || 0).toFixed(2)),
-      avgQuizScore: Number((summary?.avgQuizScore || 0).toFixed(2)),
+      avgQuizScore: Number(
+        ((summary?.quizCount || 0) > 0
+          ? summary.quizScoreTotal / summary.quizCount
+          : 0
+        ).toFixed(2),
+      ),
       completionRate:
         summary?.totalActivities > 0
           ? Number(
-            (
-              (summary.completedActivities / summary.totalActivities) *
-              100
-            ).toFixed(2),
-          )
+              (
+                (summary.completedActivities / summary.totalActivities) *
+                100
+              ).toFixed(2),
+            )
           : 0,
     },
     subjectProgress: bySubject,
@@ -204,6 +288,203 @@ const getStudentProgressSummary = async (studentId) => {
   };
 };
 
+const normalizeText = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+
+const getPastYearRange = () => {
+  const now = new Date();
+  const start = new Date(now);
+  start.setFullYear(now.getFullYear() - 1);
+  start.setDate(1);
+  start.setHours(0, 0, 0, 0);
+  return { start, end: now };
+};
+
+const buildMonthlyBuckets = ({ start, end }) => {
+  const buckets = [];
+  const cursor = new Date(start);
+  cursor.setDate(1);
+  while (cursor <= end) {
+    buckets.push({
+      key: `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`,
+      label: cursor.toLocaleDateString("en-US", { month: "short" }),
+    });
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return buckets;
+};
+
+const getTeacherCompletionTrend = async ({ studentIds, courseIds, range }) => {
+  const buckets = buildMonthlyBuckets(range);
+
+  if (!studentIds.length) {
+    return buckets.map((bucket) => ({
+      month: bucket.label,
+      completed: 0,
+      avgQuizScore: 0,
+    }));
+  }
+
+  const match = {
+    student: { $in: studentIds },
+    lastUpdated: { $gte: range.start, $lte: range.end },
+  };
+  if (courseIds.length) match.course = { $in: courseIds };
+
+  const raw = await Progress.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: { $dateToString: { format: "%Y-%m", date: "$lastUpdated" } },
+        completed: {
+          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
+        avgQuizScore: {
+          $avg: { $cond: [{ $eq: ["$activityType", "quiz"] }, "$score", null] },
+        },
+      },
+    },
+  ]);
+
+  const byKey = new Map(raw.map((item) => [item._id, item]));
+
+  return buckets.map((bucket) => {
+    const found = byKey.get(bucket.key);
+    return {
+      month: bucket.label,
+      completed: found?.completed || 0,
+      avgQuizScore: Number((found?.avgQuizScore || 0).toFixed(1)),
+    };
+  });
+};
+
+const getTeacherCoursePerformance = async ({ studentIds, courseIds }) => {
+  if (!studentIds.length || !courseIds.length) return [];
+
+  return Progress.aggregate([
+    { $match: { student: { $in: studentIds }, course: { $in: courseIds } } },
+    {
+      $group: {
+        _id: "$course",
+        total: { $sum: 1 },
+        completed: {
+          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
+      },
+    },
+    {
+      $lookup: {
+        from: "courses",
+        localField: "_id",
+        foreignField: "_id",
+        as: "course",
+      },
+    },
+    { $unwind: "$course" },
+    {
+      $project: {
+        _id: 0,
+        courseId: "$course._id",
+        subject: "$course.name",
+        completionRate: {
+          $cond: [
+            { $eq: ["$total", 0] },
+            0,
+            {
+              $round: [
+                { $multiply: [{ $divide: ["$completed", "$total"] }, 100] },
+                0,
+              ],
+            },
+          ],
+        },
+      },
+    },
+  ]);
+};
+
+const getTeacherRecentWork = async ({ studentIds, courseIds }) => {
+  if (!studentIds.length || !courseIds.length) return [];
+
+  const [practice, quiz, courses] = await Promise.all([
+    Progress.aggregate([
+      {
+        $match: {
+          student: { $in: studentIds },
+          course: { $in: courseIds },
+          activityType: "independent",
+        },
+      },
+      {
+        $group: {
+          _id: "$course",
+          completed: {
+            $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+          },
+          total: { $sum: 1 },
+        },
+      },
+    ]),
+    Progress.aggregate([
+      {
+        $match: {
+          student: { $in: studentIds },
+          course: { $in: courseIds },
+          activityType: "quiz",
+        },
+      },
+      {
+        $group: {
+          _id: "$course",
+          completed: {
+            $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+          },
+          total: { $sum: 1 },
+          lowestScorePct: {
+            $min: {
+              $cond: [
+                {
+                  $and: [
+                    { $ne: ["$score", null] },
+                    { $gt: ["$totalQuestions", 0] },
+                  ],
+                },
+                {
+                  $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100],
+                },
+                null,
+              ],
+            },
+          },
+        },
+      },
+    ]),
+    Course.find({ _id: { $in: courseIds } })
+      .select("name")
+      .lean(),
+  ]);
+
+  const practiceMap = new Map(practice.map((item) => [String(item._id), item]));
+  const quizMap = new Map(quiz.map((item) => [String(item._id), item]));
+
+  return courses.map((course) => {
+    const p = practiceMap.get(String(course._id));
+    const q = quizMap.get(String(course._id));
+    return {
+      subject: course.name,
+      practiceCompleted: p?.completed || 0,
+      practiceTotal: p?.total || 0,
+      quizCompleted: q?.completed || 0,
+      quizTotal: q?.total || 0,
+      lowestQuizScore:
+        q?.lowestScorePct != null ? Math.round(q.lowestScorePct) : null,
+    };
+  });
+};
+
 const ensureSchool = async ({ schoolId, schoolName }) => {
   if (schoolId && mongoose.Types.ObjectId.isValid(schoolId)) {
     return School.findById(schoolId);
@@ -218,6 +499,58 @@ const ensureGrade = (gradeLevel) => {
     throw new AppError(400, "Invalid grade level");
   }
   return normalized;
+};
+
+const parseBulkRecordIds = (value, recordLabel) => {
+  if (!Array.isArray(value)) {
+    throw new AppError(400, `${recordLabel} IDs must be an array`);
+  }
+
+  const ids = [
+    ...new Set(value.map((item) => String(item).trim()).filter(Boolean)),
+  ];
+  if (ids.length === 0) {
+    throw new AppError(400, `Select at least one ${recordLabel.toLowerCase()}`);
+  }
+  if (ids.length > 500) {
+    throw new AppError(
+      400,
+      `A maximum of 500 ${recordLabel.toLowerCase()}s can be updated`,
+    );
+  }
+  if (ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) {
+    throw new AppError(
+      400,
+      `Some ${recordLabel.toLowerCase()} IDs are invalid`,
+    );
+  }
+
+  return ids;
+};
+
+const updatePeopleGradeLevel = async ({
+  Model,
+  ids,
+  gradeLevel,
+  recordLabel,
+}) => {
+  const records = await Model.find({ _id: { $in: ids } })
+    .select("_id user")
+    .lean();
+  if (records.length !== ids.length) {
+    throw new AppError(
+      404,
+      `Some selected ${recordLabel.toLowerCase()}s were not found`,
+    );
+  }
+
+  const userIds = records.map((record) => record.user).filter(Boolean);
+  await Promise.all([
+    Model.updateMany({ _id: { $in: ids } }, { $set: { gradeLevel } }),
+    User.updateMany({ _id: { $in: userIds } }, { $set: { gradeLevel } }),
+  ]);
+
+  return records.length;
 };
 
 const parseArrayField = (value) => {
@@ -247,7 +580,9 @@ const parseArrayField = (value) => {
 };
 
 const parseCourseIds = (payload) =>
-  parseArrayField(payload.courseIds ?? payload["courseIds[]"] ?? payload.courseId)
+  parseArrayField(
+    payload.courseIds ?? payload["courseIds[]"] ?? payload.courseId,
+  )
     .map((item) => String(item).trim())
     .filter(Boolean);
 
@@ -370,7 +705,10 @@ const createStudentRecord = async (payload, files) => {
 
   const file = {};
   if (files?.file?.[0]) {
-    const uploadResult = await uploadOnCloudinary(files.file[0].buffer, "files");
+    const uploadResult = await uploadOnCloudinary(
+      files.file[0].buffer,
+      "files",
+    );
     file.url = uploadResult.secure_url;
     file.public_id = uploadResult.public_id;
   }
@@ -486,7 +824,10 @@ const createTeacherRecord = async (payload, files) => {
 
   const picture = {};
   if (files?.picture?.[0]) {
-    const upload = await uploadOnCloudinary(files.picture[0].buffer, "profiles");
+    const upload = await uploadOnCloudinary(
+      files.picture[0].buffer,
+      "profiles",
+    );
     picture.url = upload.secure_url;
     picture.public_id = upload.public_id;
   }
@@ -749,35 +1090,111 @@ export const getStudents = catchAsync(async (req, res) => {
   });
 });
 
-export const getStudentById = catchAsync(async (req, res, next) => {
-  const student = await Student.findById(req.params.studentId)
-    .populate("school", "name schoolCode")
-    .populate("user", "userId name")
-    .lean();
+export const getStudentsExport = catchAsync(async (req, res) => {
+  const filter = {};
 
-  if (!student) {
-    return next(new AppError(404, "Student not found"));
+  if (req.query.status) filter.status = req.query.status;
+  if (req.query.schoolId) filter.school = req.query.schoolId;
+  if (req.query.gradeLevel)
+    filter.gradeLevel = normalizeGradeLevel(req.query.gradeLevel);
+
+  if (req.query.search) {
+    const regex = buildSearchRegex(req.query.search);
+    const [users, schools] = await Promise.all([
+      User.find(
+        { role: "student", $or: [{ name: regex }, { userId: regex }] },
+        { _id: 1 },
+      ),
+      School.find({ name: regex }, { _id: 1 }),
+    ]);
+
+    filter.$or = [{ name: regex }];
+    if (users.length)
+      filter.$or.push({ user: { $in: users.map((user) => user._id) } });
+    if (schools.length)
+      filter.$or.push({ school: { $in: schools.map((school) => school._id) } });
   }
 
-  const progressSheet = await getStudentProgressSummary(student._id);
+  const students = await Student.find(filter)
+    .populate("school", "name")
+    .populate("user", "userId mac_id")
+    .sort({ createdAt: -1 })
+    .lean();
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Student export data fetched successfully",
+    data: students.map((student) => ({
+      serialNumber: student.user?.mac_id || "",
+      schoolName: student.school?.name || "",
+      studentName: student.name,
+      userId: student.user?.userId || "",
+      gradeLevel: student.gradeLevel,
+    })),
+  });
+});
+
+export const getStudentById = catchAsync(async (req, res, next) => {
+  const {
+    gradeLevel = "ALL",
+    subject = "ALL",
+    timePeriod = "Today",
+    courseId,
+  } = req.query;
+  const studentId = req.params.studentId;
+
+  // 1. Verify student exists (no school restriction for admin)
+  const student = await Student.findById(studentId)
+    .populate("school", "name schoolCode")
+    .populate("user", "userId name lastLoginAt")
+    .lean();
+  if (!student) return next(new AppError(404, "Student not found"));
+
+  // 2. Compute all course IDs that this student has progress in
+  const allStudentCourseIds = await Progress.distinct("course", {
+    student: studentId,
+  });
+  const courseIds = allStudentCourseIds.map((id) => id.toString());
+
+  // 3. (Optional) Filter by subject if needed – you may need to fetch course docs
+  //    Match the same subject aliases used by the teacher overview.
+  let filteredCourseIds = courseIds;
+  if (subject !== "ALL") {
+    filteredCourseIds = await filterCoursesBySubject(courseIds, subject);
+  }
+
+  // 4. If courseId is provided, override
+  let selectedCourseIds = filteredCourseIds;
+  if (courseId) {
+    if (!courseIds.includes(courseId)) {
+      return next(new AppError(400, "Course not associated with this student"));
+    }
+    if (
+      normalizeText(subject) !== "all" &&
+      !filteredCourseIds.includes(courseId)
+    ) {
+      return next(new AppError(400, "courseId does not match subject filter"));
+    }
+    selectedCourseIds = [courseId];
+  }
+
+  // 5. Get the full overview using the shared service
+  const overviewData = await getStudentOverviewData({
+    studentId,
+    gradeLevel,
+    subject,
+    timePeriod,
+    courseId,
+    filteredCourseIds: selectedCourseIds,
+    allCourseIds: courseIds, // for quizScoreTable – all courses
+  });
 
   sendResponse(res, {
     statusCode: 200,
     success: true,
     message: "Student details fetched successfully",
-    data: {
-      student: {
-        _id: student._id,
-        studentName: student.name,
-        userId: student.user?.userId,
-        schoolName: student.school?.name,
-        schoolCode: student.school?.schoolCode,
-        gradeLevel: student.gradeLevel,
-        status: student.status,
-        picture: student.picture || { url: "", public_id: "" },
-      },
-      progressSheet,
-    },
+    data: overviewData,
   });
 });
 
@@ -866,6 +1283,24 @@ export const updateStudent = catchAsync(async (req, res, next) => {
       gradeLevel: student.gradeLevel,
       status: student.status,
     },
+  });
+});
+
+export const updateStudentsGradeLevel = catchAsync(async (req, res) => {
+  const studentIds = parseBulkRecordIds(req.body.studentIds, "Student");
+  const gradeLevel = ensureGrade(req.body.gradeLevel);
+  const updatedCount = await updatePeopleGradeLevel({
+    Model: Student,
+    ids: studentIds,
+    gradeLevel,
+    recordLabel: "Student",
+  });
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Selected students' grade level updated successfully",
+    data: { updatedCount, gradeLevel },
   });
 });
 
@@ -989,6 +1424,51 @@ export const getTeachers = catchAsync(async (req, res) => {
   });
 });
 
+export const getTeachersExport = catchAsync(async (req, res) => {
+  const filter = {};
+
+  if (req.query.status) filter.status = req.query.status;
+  if (req.query.schoolId) filter.school = req.query.schoolId;
+  if (req.query.gradeLevel)
+    filter.gradeLevel = normalizeGradeLevel(req.query.gradeLevel);
+
+  if (req.query.search) {
+    const regex = buildSearchRegex(req.query.search);
+    const [users, schools] = await Promise.all([
+      User.find(
+        { role: "teacher", $or: [{ name: regex }, { userId: regex }] },
+        { _id: 1 },
+      ),
+      School.find({ name: regex }, { _id: 1 }),
+    ]);
+
+    filter.$or = [{ name: regex }];
+    if (users.length)
+      filter.$or.push({ user: { $in: users.map((user) => user._id) } });
+    if (schools.length)
+      filter.$or.push({ school: { $in: schools.map((school) => school._id) } });
+  }
+
+  const teachers = await Teacher.find(filter)
+    .populate("school", "name")
+    .populate("user", "userId mac_id")
+    .sort({ createdAt: -1 })
+    .lean();
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Teacher export data fetched successfully",
+    data: teachers.map((teacher) => ({
+      serialNumber: teacher.user?.mac_id || "",
+      schoolName: teacher.school?.name || "",
+      teacherName: teacher.name,
+      userId: teacher.user?.userId || "",
+      gradeLevel: teacher.gradeLevel,
+    })),
+  });
+});
+
 export const getTeacherById = catchAsync(async (req, res, next) => {
   const teacher = await Teacher.findById(req.params.teacherId)
     .populate("school", "name schoolCode")
@@ -1012,6 +1492,58 @@ export const getTeacherById = catchAsync(async (req, res, next) => {
       status: teacher.status,
       picture: teacher.picture || { url: "", public_id: "" },
       courses: teacher.courses || [],
+    },
+  });
+});
+
+export const getTeacherOverview = catchAsync(async (req, res, next) => {
+  const teacher = await Teacher.findById(req.params.teacherId)
+    .populate("school", "name schoolCode")
+    .populate("courses", "name")
+    .lean();
+
+  if (!teacher) return next(new AppError(404, "Teacher not found"));
+
+  const courses = teacher.courses || [];
+  const courseIds = courses.map((course) => course._id);
+
+  const subjectQuery = req.query.subject
+    ? normalizeText(req.query.subject)
+    : null;
+  const matchedCourse = subjectQuery
+    ? courses.find((course) => normalizeText(course.name) === subjectQuery)
+    : null;
+  const trendCourseIds = matchedCourse ? [matchedCourse._id] : courseIds;
+
+  const students = await Student.find({
+    school: teacher.school?._id,
+    gradeLevel: teacher.gradeLevel,
+  })
+    .select("_id")
+    .lean();
+  const studentIds = students.map((student) => student._id);
+
+  const range = getPastYearRange();
+
+  const [monthlyTrend, performanceRange, recentWork] = await Promise.all([
+    getTeacherCompletionTrend({ studentIds, courseIds: trendCourseIds, range }),
+    getTeacherCoursePerformance({ studentIds, courseIds }),
+    getTeacherRecentWork({ studentIds, courseIds }),
+  ]);
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Teacher overview fetched successfully",
+    data: {
+      courses: courses.map((course) => ({
+        _id: course._id,
+        name: course.name,
+      })),
+      totalStudents: studentIds.length,
+      monthlyTrend,
+      performanceRange,
+      recentWork,
     },
   });
 });
@@ -1061,18 +1593,34 @@ export const updateTeacher = catchAsync(async (req, res, next) => {
     user.school = school._id;
   }
 
-  if (Array.isArray(req.body.courseIds)) {
-    const validCount = await Course.countDocuments({
-      _id: { $in: req.body.courseIds },
-    });
-    if (validCount !== req.body.courseIds.length) {
+  const hasCourseIdsField =
+    Object.prototype.hasOwnProperty.call(req.body, "courseIds") ||
+    Object.prototype.hasOwnProperty.call(req.body, "courseIds[]");
+
+  if (hasCourseIdsField) {
+    const courseIds = parseCourseIds(req.body);
+    const invalidCourseIds = courseIds.filter(
+      (courseId) => !mongoose.Types.ObjectId.isValid(courseId),
+    );
+    if (invalidCourseIds.length > 0) {
       return next(new AppError(400, "Some course IDs are invalid"));
     }
-    teacher.courses = req.body.courseIds;
+
+    const validCount = await Course.countDocuments({
+      _id: { $in: courseIds },
+    });
+    if (validCount !== courseIds.length) {
+      return next(new AppError(400, "Some course IDs are invalid"));
+    }
+
+    teacher.courses = courseIds;
   }
 
   if (req.files?.picture?.[0]) {
-    const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
+    const upload = await uploadOnCloudinary(
+      req.files.picture[0].buffer,
+      "profiles",
+    );
     teacher.picture = {
       url: upload.secure_url,
       public_id: upload.public_id,
@@ -1101,6 +1649,24 @@ export const updateTeacher = catchAsync(async (req, res, next) => {
       gradeLevel: teacher.gradeLevel,
       status: teacher.status,
     },
+  });
+});
+
+export const updateTeachersGradeLevel = catchAsync(async (req, res) => {
+  const teacherIds = parseBulkRecordIds(req.body.teacherIds, "Teacher");
+  const gradeLevel = ensureGrade(req.body.gradeLevel);
+  const updatedCount = await updatePeopleGradeLevel({
+    Model: Teacher,
+    ids: teacherIds,
+    gradeLevel,
+    recordLabel: "Teacher",
+  });
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Selected teachers' grade level updated successfully",
+    data: { updatedCount, gradeLevel },
   });
 });
 
@@ -1143,6 +1709,30 @@ export const getSchools = catchAsync(async (req, res) => {
       items,
       meta: getPaginationMeta({ page, limit, total }),
     },
+  });
+});
+
+export const getSchoolsExport = catchAsync(async (req, res) => {
+  const filter = {};
+
+  if (req.query.status) filter.status = req.query.status;
+  if (req.query.search) {
+    const regex = buildSearchRegex(req.query.search);
+    filter.$or = [{ name: regex }, { schoolCode: regex }];
+  }
+
+  const schools = await School.find(filter).sort({ createdAt: -1 }).lean();
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "School export data fetched successfully",
+    data: schools.map((school, index) => ({
+      serialNumber: index + 1,
+      schoolName: school.name,
+      schoolCode: school.schoolCode || school.schooleCode || "",
+      gradeLevel: school.gradeLevels?.join(", ") || "",
+    })),
   });
 });
 
@@ -1208,6 +1798,30 @@ export const updateSchool = catchAsync(async (req, res, next) => {
   });
 });
 
+export const updateSchoolsGradeLevel = catchAsync(async (req, res) => {
+  const schoolIds = parseBulkRecordIds(req.body.schoolIds, "School");
+  const gradeLevel = ensureGrade(req.body.gradeLevel);
+  const existingCount = await School.countDocuments({
+    _id: { $in: schoolIds },
+  });
+
+  if (existingCount !== schoolIds.length) {
+    throw new AppError(404, "Some selected schools were not found");
+  }
+
+  await School.updateMany(
+    { _id: { $in: schoolIds } },
+    { $set: { gradeLevels: [gradeLevel] } },
+  );
+
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Selected schools' grade level updated successfully",
+    data: { updatedCount: existingCount, gradeLevel },
+  });
+});
+
 export const deleteSchool = catchAsync(async (req, res, next) => {
   const school = await School.findById(req.params.schoolId);
   if (!school) return next(new AppError(404, "School not found"));
@@ -1241,8 +1855,8 @@ export const addCourse = catchAsync(async (req, res, next) => {
 
   const normalizedGradeLevels = Array.isArray(gradeLevels)
     ? gradeLevels
-      .map((item) => normalizeGradeLevel(item))
-      .filter((item) => GRADE_LEVELS.includes(item))
+        .map((item) => normalizeGradeLevel(item))
+        .filter((item) => GRADE_LEVELS.includes(item))
     : [];
 
   const image = {};
@@ -1484,7 +2098,10 @@ export const updateMyProfile = catchAsync(async (req, res) => {
   }
 
   if (req.files?.picture?.[0]) {
-    const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
+    const upload = await uploadOnCloudinary(
+      req.files.picture[0].buffer,
+      "profiles",
+    );
     payload.profile = {
       url: upload.secure_url,
       public_id: upload.public_id,
