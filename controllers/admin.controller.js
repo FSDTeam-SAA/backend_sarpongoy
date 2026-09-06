@@ -15,6 +15,10 @@ import catchAsync from "../utils/catchAsync.js";
 import sendResponse from "../utils/sendResponse.js";
 import { uploadOnCloudinary } from "../utils/commonMethod.js";
 import mongoose from "mongoose";
+import {
+  filterCoursesBySubject,
+  getStudentOverviewData,
+} from "../services/studentOverview.service.js";
 
 const buildSearchRegex = (value) =>
   new RegExp(
@@ -256,11 +260,11 @@ const getStudentProgressSummary = async (studentId) => {
       completionRate:
         summary?.totalActivities > 0
           ? Number(
-            (
-              (summary.completedActivities / summary.totalActivities) *
-              100
-            ).toFixed(2),
-          )
+              (
+                (summary.completedActivities / summary.totalActivities) *
+                100
+              ).toFixed(2),
+            )
           : 0,
     },
     subjectProgress: bySubject,
@@ -448,7 +452,9 @@ const getTeacherRecentWork = async ({ studentIds, courseIds }) => {
                     { $gt: ["$totalQuestions", 0] },
                   ],
                 },
-                { $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100] },
+                {
+                  $multiply: [{ $divide: ["$score", "$totalQuestions"] }, 100],
+                },
                 null,
               ],
             },
@@ -500,24 +506,42 @@ const parseBulkRecordIds = (value, recordLabel) => {
     throw new AppError(400, `${recordLabel} IDs must be an array`);
   }
 
-  const ids = [...new Set(value.map((item) => String(item).trim()).filter(Boolean))];
+  const ids = [
+    ...new Set(value.map((item) => String(item).trim()).filter(Boolean)),
+  ];
   if (ids.length === 0) {
     throw new AppError(400, `Select at least one ${recordLabel.toLowerCase()}`);
   }
   if (ids.length > 500) {
-    throw new AppError(400, `A maximum of 500 ${recordLabel.toLowerCase()}s can be updated`);
+    throw new AppError(
+      400,
+      `A maximum of 500 ${recordLabel.toLowerCase()}s can be updated`,
+    );
   }
   if (ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) {
-    throw new AppError(400, `Some ${recordLabel.toLowerCase()} IDs are invalid`);
+    throw new AppError(
+      400,
+      `Some ${recordLabel.toLowerCase()} IDs are invalid`,
+    );
   }
 
   return ids;
 };
 
-const updatePeopleGradeLevel = async ({ Model, ids, gradeLevel, recordLabel }) => {
-  const records = await Model.find({ _id: { $in: ids } }).select("_id user").lean();
+const updatePeopleGradeLevel = async ({
+  Model,
+  ids,
+  gradeLevel,
+  recordLabel,
+}) => {
+  const records = await Model.find({ _id: { $in: ids } })
+    .select("_id user")
+    .lean();
   if (records.length !== ids.length) {
-    throw new AppError(404, `Some selected ${recordLabel.toLowerCase()}s were not found`);
+    throw new AppError(
+      404,
+      `Some selected ${recordLabel.toLowerCase()}s were not found`,
+    );
   }
 
   const userIds = records.map((record) => record.user).filter(Boolean);
@@ -556,7 +580,9 @@ const parseArrayField = (value) => {
 };
 
 const parseCourseIds = (payload) =>
-  parseArrayField(payload.courseIds ?? payload["courseIds[]"] ?? payload.courseId)
+  parseArrayField(
+    payload.courseIds ?? payload["courseIds[]"] ?? payload.courseId,
+  )
     .map((item) => String(item).trim())
     .filter(Boolean);
 
@@ -679,7 +705,10 @@ const createStudentRecord = async (payload, files) => {
 
   const file = {};
   if (files?.file?.[0]) {
-    const uploadResult = await uploadOnCloudinary(files.file[0].buffer, "files");
+    const uploadResult = await uploadOnCloudinary(
+      files.file[0].buffer,
+      "files",
+    );
     file.url = uploadResult.secure_url;
     file.public_id = uploadResult.public_id;
   }
@@ -795,7 +824,10 @@ const createTeacherRecord = async (payload, files) => {
 
   const picture = {};
   if (files?.picture?.[0]) {
-    const upload = await uploadOnCloudinary(files.picture[0].buffer, "profiles");
+    const upload = await uploadOnCloudinary(
+      files.picture[0].buffer,
+      "profiles",
+    );
     picture.url = upload.secure_url;
     picture.public_id = upload.public_id;
   }
@@ -1104,34 +1136,65 @@ export const getStudentsExport = catchAsync(async (req, res) => {
 });
 
 export const getStudentById = catchAsync(async (req, res, next) => {
-  const student = await Student.findById(req.params.studentId)
-    .populate("school", "name schoolCode")
-    .populate("user", "userId name")
-    .lean();
+  const {
+    gradeLevel = "ALL",
+    subject = "ALL",
+    timePeriod = "Today",
+    courseId,
+  } = req.query;
+  const studentId = req.params.studentId;
 
-  if (!student) {
-    return next(new AppError(404, "Student not found"));
+  // 1. Verify student exists (no school restriction for admin)
+  const student = await Student.findById(studentId)
+    .populate("school", "name schoolCode")
+    .populate("user", "userId name lastLoginAt")
+    .lean();
+  if (!student) return next(new AppError(404, "Student not found"));
+
+  // 2. Compute all course IDs that this student has progress in
+  const allStudentCourseIds = await Progress.distinct("course", {
+    student: studentId,
+  });
+  const courseIds = allStudentCourseIds.map((id) => id.toString());
+
+  // 3. (Optional) Filter by subject if needed – you may need to fetch course docs
+  //    Match the same subject aliases used by the teacher overview.
+  let filteredCourseIds = courseIds;
+  if (subject !== "ALL") {
+    filteredCourseIds = await filterCoursesBySubject(courseIds, subject);
   }
 
-  const progressSheet = await getStudentProgressSummary(student._id);
+  // 4. If courseId is provided, override
+  let selectedCourseIds = filteredCourseIds;
+  if (courseId) {
+    if (!courseIds.includes(courseId)) {
+      return next(new AppError(400, "Course not associated with this student"));
+    }
+    if (
+      normalizeText(subject) !== "all" &&
+      !filteredCourseIds.includes(courseId)
+    ) {
+      return next(new AppError(400, "courseId does not match subject filter"));
+    }
+    selectedCourseIds = [courseId];
+  }
+
+  // 5. Get the full overview using the shared service
+  const overviewData = await getStudentOverviewData({
+    studentId,
+    gradeLevel,
+    subject,
+    timePeriod,
+    courseId,
+    filteredCourseIds: selectedCourseIds,
+    allCourseIds: courseIds, // for quizScoreTable – all courses
+  });
 
   sendResponse(res, {
     statusCode: 200,
     success: true,
     message: "Student details fetched successfully",
-    data: {
-      student: {
-        _id: student._id,
-        studentName: student.name,
-        userId: student.user?.userId,
-        schoolName: student.school?.name,
-        schoolCode: student.school?.schoolCode,
-        gradeLevel: student.gradeLevel,
-        status: student.status,
-        picture: student.picture || { url: "", public_id: "" },
-      },
-      progressSheet,
-    },
+    data: overviewData,
   });
 });
 
@@ -1444,7 +1507,9 @@ export const getTeacherOverview = catchAsync(async (req, res, next) => {
   const courses = teacher.courses || [];
   const courseIds = courses.map((course) => course._id);
 
-  const subjectQuery = req.query.subject ? normalizeText(req.query.subject) : null;
+  const subjectQuery = req.query.subject
+    ? normalizeText(req.query.subject)
+    : null;
   const matchedCourse = subjectQuery
     ? courses.find((course) => normalizeText(course.name) === subjectQuery)
     : null;
@@ -1471,7 +1536,10 @@ export const getTeacherOverview = catchAsync(async (req, res, next) => {
     success: true,
     message: "Teacher overview fetched successfully",
     data: {
-      courses: courses.map((course) => ({ _id: course._id, name: course.name })),
+      courses: courses.map((course) => ({
+        _id: course._id,
+        name: course.name,
+      })),
       totalStudents: studentIds.length,
       monthlyTrend,
       performanceRange,
@@ -1549,7 +1617,10 @@ export const updateTeacher = catchAsync(async (req, res, next) => {
   }
 
   if (req.files?.picture?.[0]) {
-    const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
+    const upload = await uploadOnCloudinary(
+      req.files.picture[0].buffer,
+      "profiles",
+    );
     teacher.picture = {
       url: upload.secure_url,
       public_id: upload.public_id,
@@ -1730,7 +1801,9 @@ export const updateSchool = catchAsync(async (req, res, next) => {
 export const updateSchoolsGradeLevel = catchAsync(async (req, res) => {
   const schoolIds = parseBulkRecordIds(req.body.schoolIds, "School");
   const gradeLevel = ensureGrade(req.body.gradeLevel);
-  const existingCount = await School.countDocuments({ _id: { $in: schoolIds } });
+  const existingCount = await School.countDocuments({
+    _id: { $in: schoolIds },
+  });
 
   if (existingCount !== schoolIds.length) {
     throw new AppError(404, "Some selected schools were not found");
@@ -1782,8 +1855,8 @@ export const addCourse = catchAsync(async (req, res, next) => {
 
   const normalizedGradeLevels = Array.isArray(gradeLevels)
     ? gradeLevels
-      .map((item) => normalizeGradeLevel(item))
-      .filter((item) => GRADE_LEVELS.includes(item))
+        .map((item) => normalizeGradeLevel(item))
+        .filter((item) => GRADE_LEVELS.includes(item))
     : [];
 
   const image = {};
@@ -2025,7 +2098,10 @@ export const updateMyProfile = catchAsync(async (req, res) => {
   }
 
   if (req.files?.picture?.[0]) {
-    const upload = await uploadOnCloudinary(req.files.picture[0].buffer, "profiles");
+    const upload = await uploadOnCloudinary(
+      req.files.picture[0].buffer,
+      "profiles",
+    );
     payload.profile = {
       url: upload.secure_url,
       public_id: upload.public_id,
