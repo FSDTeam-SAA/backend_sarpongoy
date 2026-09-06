@@ -1132,9 +1132,6 @@ export const getQuizScoreTable = async ({
 export const getTeacherDashboard = catchAsync(async (req, res, next) => {
   const teacher = await getTeacherDoc(req.user._id);
   if (!teacher) return next(new AppError(404, "Teacher profile not found"));
-  if (!teacher.courses?.length) {
-    return next(new AppError(403, "No subjects are assigned to this teacher"));
-  }
 
   const gradeLevel = req.query.gradeLevel || "ALL";
   const timePeriod = req.query.timePeriod || "Past Year";
@@ -1176,7 +1173,6 @@ export const getTeacherDashboard = catchAsync(async (req, res, next) => {
   // Overall progress counts (no filters)
   const overallProgressMatch = {
     student: { $in: allStudentIds },
-    course: { $in: teacher.courses.map((course) => course._id) },
     status: "completed",
   };
 
@@ -1351,7 +1347,6 @@ export const getTeacherStudents = catchAsync(async (req, res, next) => {
   // Get all quiz records for these students
   const quizRecords = await Progress.find({
     student: { $in: studentIds },
-    course: { $in: teacher.courses.map((course) => course._id) },
     activityType: "quiz",
     status: "completed",
     score: { $ne: null },
@@ -1440,9 +1435,6 @@ export const getTeacherStudents = catchAsync(async (req, res, next) => {
 export const getTeacherStudentById = catchAsync(async (req, res, next) => {
   const teacher = await getTeacherDoc(req.user._id);
   if (!teacher) return next(new AppError(404, "Teacher profile not found"));
-  if (!teacher.courses?.length) {
-    return next(new AppError(403, "No subjects are assigned to this teacher"));
-  }
 
   const student = await Student.findOne({
     _id: req.params.studentId,
@@ -1454,12 +1446,22 @@ export const getTeacherStudentById = catchAsync(async (req, res, next) => {
 
   if (!student) return next(new AppError(404, "Student not found"));
 
-  const progressSheet = await getStudentProgressSummary({
-    studentId: student._id,
-    courseIds: teacher.courses.map((course) => course._id),
-    range: getDateRangeFromPeriod("Past Year"),
-    timePeriod: "Past Year",
-  });
+  const progressSheet = teacher.courses?.length
+    ? await getStudentProgressSummary({
+        studentId: student._id,
+        courseIds: teacher.courses.map((course) => course._id),
+        range: getDateRangeFromPeriod("Past Year"),
+        timePeriod: "Past Year",
+      })
+    : {
+        summary: {
+          activityCount: 0,
+          totalHours: 0,
+          avgDailyHours: 0,
+          avgQuizScore: 0,
+        },
+        subjectProgress: [],
+      };
 
   sendResponse(res, {
     statusCode: 200,
@@ -1495,12 +1497,6 @@ export const getTeacherStudentOverview = catchAsync(async (req, res, next) => {
   // Get all course IDs for the teacher (for quizScoreTable – subject ignored)
   const allTeacherCourseIds =
     teacher.courses?.map((c) => c._id.toString()) || [];
-
-  if (!allTeacherCourseIds.length) {
-    return next(
-      new AppError(403, "No subjects are assigned to this teacher"),
-    );
-  }
 
   // Get course IDs filtered by subject (for other parts)
   const allowedCourseIds = resolveTeacherCourseIds(
