@@ -41,7 +41,7 @@ const userSchema = new Schema(
     },
     gradeLevel: {
       type: String,
-      enum: ["JHS 1", "JHS 2", "JHS 3", "SS 1", "SS 2", "SS 3", "SS 4", "SS 5"],
+      enum: ["JHS 1", "JHS 2", "JHS 3"],
     },
     profile: {
       public_id: { type: String, default: "" },

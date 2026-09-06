@@ -7,11 +7,6 @@ const normalizeGradeLevel = (value) => {
     JHS1: "JHS 1",
     JHS2: "JHS 2",
     JHS3: "JHS 3",
-    SS1: "SS 1",
-    SS2: "SS 2",
-    SS3: "SS 3",
-    SS4: "SS 4",
-    SS5: "SS 5",
   };
   return map[compact] || value;
 };
@@ -62,7 +57,7 @@ const teacherSchema = new Schema(
     },
     gradeLevel: {
       type: String,
-      enum: ["JHS 1", "JHS 2", "JHS 3", "SS 1", "SS 2", "SS 3", "SS 4", "SS 5"],
+      enum: ["JHS 1", "JHS 2", "JHS 3"],
       set: normalizeGradeLevel,
       required: true,
       index: true,
