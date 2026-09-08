@@ -1180,21 +1180,27 @@ export const getStudentById = catchAsync(async (req, res, next) => {
   }
 
   // 5. Get the full overview using the shared service
-  const overviewData = await getStudentOverviewData({
-    studentId,
-    gradeLevel,
-    subject,
-    timePeriod,
-    courseId,
-    filteredCourseIds: selectedCourseIds,
-    allCourseIds: courseIds, // for quizScoreTable – all courses
-  });
+  const [overviewData, progressSheet] = await Promise.all([
+    getStudentOverviewData({
+      studentId,
+      gradeLevel,
+      subject,
+      timePeriod,
+      courseId,
+      filteredCourseIds: selectedCourseIds,
+      allCourseIds: courseIds, // for quizScoreTable – all courses
+    }),
+    getStudentProgressSummary(student._id),
+  ]);
 
   sendResponse(res, {
     statusCode: 200,
     success: true,
     message: "Student details fetched successfully",
-    data: overviewData,
+    data: {
+      ...overviewData,
+      progressSheet,
+    },
   });
 });
 
