@@ -294,31 +294,39 @@ const normalizeText = (value) =>
     .toLowerCase()
     .replace(/\s+/g, " ");
 
-const getPastYearRange = () => {
+const CALENDAR_MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+const getCalendarYearRange = (yearInput) => {
   const now = new Date();
-  const start = new Date(now);
-  start.setFullYear(now.getFullYear() - 1);
-  start.setDate(1);
-  start.setHours(0, 0, 0, 0);
-  return { start, end: now };
+  const targetYear = Number(yearInput) || now.getFullYear();
+  const start = new Date(targetYear, 0, 1, 0, 0, 0, 0);
+  const end = new Date(targetYear, 11, 31, 23, 59, 59, 999);
+  return { start, end, year: targetYear };
 };
 
-const buildMonthlyBuckets = ({ start, end }) => {
-  const buckets = [];
-  const cursor = new Date(start);
-  cursor.setDate(1);
-  while (cursor <= end) {
-    buckets.push({
-      key: `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`,
-      label: cursor.toLocaleDateString("en-US", { month: "short" }),
-    });
-    cursor.setMonth(cursor.getMonth() + 1);
-  }
-  return buckets;
+const buildMonthlyBuckets = (targetYear) => {
+  const year = targetYear || new Date().getFullYear();
+  return CALENDAR_MONTHS.map((label, index) => ({
+    key: `${year}-${String(index + 1).padStart(2, "0")}`,
+    label,
+  }));
 };
 
 const getTeacherCompletionTrend = async ({ studentIds, courseIds, range }) => {
-  const buckets = buildMonthlyBuckets(range);
+  const buckets = buildMonthlyBuckets(range.year);
 
   if (!studentIds.length) {
     return buckets.map((bucket) => ({
@@ -893,6 +901,33 @@ const createSchoolRecord = async (payload) => {
 };
 
 export const getAdminDashboard = catchAsync(async (req, res) => {
+  const { schoolId, gradeLevel } = req.query;
+
+  // Build filter criteria
+  const studentFilter = {};
+  const teacherFilter = {};
+  if (
+    schoolId &&
+    schoolId !== "ALL" &&
+    schoolId !== "__all__" &&
+    mongoose.Types.ObjectId.isValid(schoolId)
+  ) {
+    studentFilter.school = new mongoose.Types.ObjectId(schoolId);
+    teacherFilter.school = new mongoose.Types.ObjectId(schoolId);
+  }
+  if (
+    gradeLevel &&
+    gradeLevel !== "ALL" &&
+    gradeLevel !== "__all__"
+  ) {
+    const normalizedGrade = normalizeGradeLevel(gradeLevel);
+    studentFilter.gradeLevel = normalizedGrade;
+    teacherFilter.gradeLevel = normalizedGrade;
+  }
+
+  const hasFilter = Boolean(studentFilter.school || studentFilter.gradeLevel);
+
+  // 1. Counters (filtered if school/grade supplied, overall otherwise)
   const [
     totalStudents,
     totalTeachers,
@@ -902,61 +937,105 @@ export const getAdminDashboard = catchAsync(async (req, res) => {
     activeTeachers,
     inactiveTeachers,
   ] = await Promise.all([
-    Student.countDocuments(),
-    Teacher.countDocuments(),
+    Student.countDocuments(studentFilter),
+    Teacher.countDocuments(teacherFilter),
     Course.countDocuments(),
-    Student.countDocuments({ status: "active" }),
-    Student.countDocuments({ status: "inactive" }),
-    Teacher.countDocuments({ status: "active" }),
-    Teacher.countDocuments({ status: "inactive" }),
+    Student.countDocuments({ ...studentFilter, status: "active" }),
+    Student.countDocuments({ ...studentFilter, status: "inactive" }),
+    Teacher.countDocuments({ ...teacherFilter, status: "active" }),
+    Teacher.countDocuments({ ...teacherFilter, status: "inactive" }),
   ]);
 
-  const [subjectDistribution, monthlyStudentGrowth, activityByWeekday] =
-    await Promise.all([
-      Progress.aggregate([
-        { $match: { status: "completed" } },
-        { $group: { _id: "$course", completed: { $sum: 1 } } },
-        {
-          $lookup: {
-            from: "courses",
-            localField: "_id",
-            foreignField: "_id",
-            as: "course",
-          },
+  // 2. Progress filters
+  const progressMatch = { status: "completed" };
+  const progressActivityMatch = {};
+  if (hasFilter) {
+    const studentIds = await Student.find(studentFilter).distinct("_id");
+    progressMatch.student = { $in: studentIds };
+    progressActivityMatch.student = { $in: studentIds };
+  }
+
+  const totalQuizCompleted = await Progress.countDocuments({
+    ...progressMatch,
+    activityType: /^quiz$/i,
+  });
+
+  const [
+    subjectDistribution,
+    overallSubjectDistribution,
+    monthlyStudentGrowth,
+    activityByWeekday,
+  ] = await Promise.all([
+    Progress.aggregate([
+      { $match: progressMatch },
+      { $group: { _id: "$course", completed: { $sum: 1 } } },
+      {
+        $lookup: {
+          from: "courses",
+          localField: "_id",
+          foreignField: "_id",
+          as: "course",
         },
-        { $unwind: "$course" },
-        { $project: { _id: 0, subject: "$course.name", completed: 1 } },
-        { $sort: { completed: -1 } },
-      ]),
-      Student.aggregate([
-        { $match: { createdAt: { $type: "date" } } },
-        {
-          $group: {
-            _id: { $dateToString: { format: "%Y-%m", date: "$createdAt" } },
-            total: { $sum: 1 },
-          },
+      },
+      { $unwind: "$course" },
+      { $project: { _id: 0, subject: "$course.name", completed: 1 } },
+      { $sort: { completed: -1 } },
+    ]),
+    Progress.aggregate([
+      { $match: progressMatch },
+      { $group: { _id: "$course", completed: { $sum: 1 } } },
+      {
+        $lookup: {
+          from: "courses",
+          localField: "_id",
+          foreignField: "_id",
+          as: "course",
         },
-        { $sort: { _id: 1 } },
-        { $project: { _id: 0, month: "$_id", total: 1 } },
-      ]),
-      Progress.aggregate([
-        { $match: { performedAt: { $type: "date" } } },
-        {
-          $project: {
-            weekday: { $dayOfWeek: "$performedAt" },
-            activityMinutes: 1,
-          },
+      },
+      { $unwind: "$course" },
+      { $project: { _id: 0, subject: "$course.name", completed: 1 } },
+      { $sort: { completed: -1 } },
+    ]),
+    Student.aggregate([
+      { $match: { ...studentFilter, createdAt: { $type: "date" } } },
+      {
+        $group: {
+          _id: { $dateToString: { format: "%Y-%m", date: "$createdAt" } },
+          total: { $sum: 1 },
         },
-        { $group: { _id: "$weekday", minutes: { $sum: "$activityMinutes" } } },
-        { $sort: { _id: 1 } },
-      ]),
-    ]);
+      },
+      { $sort: { _id: 1 } },
+      { $project: { _id: 0, month: "$_id", total: 1 } },
+    ]),
+    Progress.aggregate([
+      {
+        $match: {
+          ...progressActivityMatch,
+          performedAt: { $type: "date" },
+        },
+      },
+      {
+        $project: {
+          weekday: { $dayOfWeek: "$performedAt" },
+          activityMinutes: 1,
+        },
+      },
+      { $group: { _id: "$weekday", minutes: { $sum: "$activityMinutes" } } },
+      { $sort: { _id: 1 } },
+    ]),
+  ]);
 
   const weekMap = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  let totalActivityMinutes = 0;
   const activityHour = weekMap.map((day, idx) => {
     const found = activityByWeekday.find((i) => i._id === idx + 1);
-    return { day, hours: Number(((found?.minutes || 0) / 60 || 0).toFixed(2)) };
+    const totalMinutes = found?.minutes || 0;
+    totalActivityMinutes += totalMinutes;
+    const totalH = Number((totalMinutes / 60).toFixed(2));
+    const avgH = Number((totalH / 100).toFixed(2));
+    return { day, hours: avgH, totalHours: totalH };
   });
+  const totalActivityHours = Number((totalActivityMinutes / 60).toFixed(1));
 
   sendResponse(res, {
     statusCode: 200,
@@ -971,9 +1050,23 @@ export const getAdminDashboard = catchAsync(async (req, res) => {
         activeTeachers,
         inactiveTeachers,
         totalSubjects,
+        totalActivityHours,
+        totalQuizCompleted,
+      },
+      counts: {
+        totalStudents,
+        activeStudents,
+        inactiveStudents,
+        totalTeachers,
+        activeTeachers,
+        inactiveTeachers,
+        totalSubjects,
+        totalActivityHours,
+        totalQuizCompleted,
       },
       charts: {
         subjectDistribution,
+        overallSubjectDistribution,
         monthlyStudentGrowth,
         activityHour,
       },
@@ -1529,7 +1622,12 @@ export const getTeacherOverview = catchAsync(async (req, res, next) => {
     .lean();
   const studentIds = students.map((student) => student._id);
 
-  const range = getPastYearRange();
+  const selectedYear =
+    Number(req.query.year) ||
+    Number(String(req.query.timePeriod || "").match(/\d{4}/)?.[0]) ||
+    new Date().getFullYear();
+
+  const range = getCalendarYearRange(selectedYear);
 
   const [monthlyTrend, performanceRange, recentWork] = await Promise.all([
     getTeacherCompletionTrend({ studentIds, courseIds: trendCourseIds, range }),
@@ -1547,6 +1645,7 @@ export const getTeacherOverview = catchAsync(async (req, res, next) => {
         name: course.name,
       })),
       totalStudents: studentIds.length,
+      year: range.year,
       monthlyTrend,
       performanceRange,
       recentWork,

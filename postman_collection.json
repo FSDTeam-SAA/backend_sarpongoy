@@ -575,7 +575,7 @@
           "request": {
             "method": "GET",
             "header": [],
-            "url": "{{baseUrl}}/api/v1/admin/students/{{studentId}}",
+            "url": "{{baseUrl}}/api/v1/admin/students/{{studentId}}?gradeLevel=ALL&subject=ALL&timePeriod=Past%20Year",
             "auth": {
               "type": "bearer",
               "bearer": [
