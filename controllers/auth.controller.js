@@ -287,7 +287,7 @@ export const login = catchAsync(async (req, res, next) => {
 });
 
 export const refreshAccessToken = catchAsync(async (req, res, next) => {
-  const token = req.cookies?.refreshToken || req.body?.refreshToken;
+  const token = req.body?.refreshToken || req.cookies?.refreshToken;
   if (!token) {
     return next(new AppError(401, "Refresh token is required"));
   }
@@ -319,7 +319,7 @@ export const refreshAccessToken = catchAsync(async (req, res, next) => {
 });
 
 export const logout = catchAsync(async (req, res) => {
-  const token = req.cookies?.refreshToken || req.body?.refreshToken;
+  const token = req.body?.refreshToken || req.cookies?.refreshToken;
 
   if (token) {
     try {
