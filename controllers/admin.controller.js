@@ -955,10 +955,11 @@ export const getAdminDashboard = catchAsync(async (req, res) => {
     progressActivityMatch.student = { $in: studentIds };
   }
 
-  const totalQuizCompleted = await Progress.countDocuments({
+  const quizProgressMatch = {
     ...progressMatch,
     activityType: /^quiz$/i,
-  });
+  };
+  const totalQuizCompleted = await Progress.countDocuments(quizProgressMatch);
 
   const [
     subjectDistribution,
@@ -982,7 +983,7 @@ export const getAdminDashboard = catchAsync(async (req, res) => {
       { $sort: { completed: -1 } },
     ]),
     Progress.aggregate([
-      { $match: progressMatch },
+      { $match: quizProgressMatch },
       { $group: { _id: "$course", completed: { $sum: 1 } } },
       {
         $lookup: {
@@ -992,8 +993,14 @@ export const getAdminDashboard = catchAsync(async (req, res) => {
           as: "course",
         },
       },
-      { $unwind: "$course" },
-      { $project: { _id: 0, subject: "$course.name", completed: 1 } },
+      { $unwind: { path: "$course", preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 0,
+          subject: { $ifNull: ["$course.name", "Unknown subject"] },
+          completed: 1,
+        },
+      },
       { $sort: { completed: -1 } },
     ]),
     Student.aggregate([
