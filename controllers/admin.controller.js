@@ -1308,6 +1308,7 @@ export const getStudentById = catchAsync(async (req, res, next) => {
 export const updateStudent = catchAsync(async (req, res, next) => {
   const student = await Student.findById(req.params.studentId);
   if (!student) return next(new AppError(404, "Student not found"));
+  const previousSchoolId = student.school;
 
   const user = await User.findById(student.user);
   if (!user) return next(new AppError(404, "Linked user not found"));
@@ -1377,7 +1378,11 @@ export const updateStudent = catchAsync(async (req, res, next) => {
   }
 
   await Promise.all([student.save(), user.save()]);
-  await syncSchoolCounts(student.school);
+  await Promise.all(
+    [...new Set([String(previousSchoolId), String(student.school)])].map(
+      (schoolId) => syncSchoolCounts(schoolId),
+    ),
+  );
 
   sendResponse(res, {
     statusCode: 200,
@@ -1814,6 +1819,27 @@ export const getSchools = catchAsync(async (req, res) => {
     School.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
     School.countDocuments(filter),
   ]);
+
+  // Read actual registrations so legacy stored counts cannot disagree with
+  // the teacher dashboard, including after transfers or imports.
+  if (items.length) {
+    const schoolIds = items.map((school) => school._id);
+    const countBySchool = (Model) =>
+      Model.aggregate([
+        { $match: { school: { $in: schoolIds } } },
+        { $group: { _id: "$school", total: { $sum: 1 } } },
+      ]);
+    const [students, teachers] = await Promise.all([
+      countBySchool(Student),
+      countBySchool(Teacher),
+    ]);
+    const studentCounts = new Map(students.map((row) => [String(row._id), row.total]));
+    const teacherCounts = new Map(teachers.map((row) => [String(row._id), row.total]));
+    for (const school of items) {
+      school.totalStudent = studentCounts.get(String(school._id)) || 0;
+      school.totalTeacher = teacherCounts.get(String(school._id)) || 0;
+    }
+  }
 
   sendResponse(res, {
     statusCode: 200,
